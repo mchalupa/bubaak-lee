@@ -2059,11 +2059,12 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
             // TODO segment
             os->write(offsets[k], arguments[k].value);
           } else {
-            ConstantExpr *CE = dyn_cast<ConstantExpr>(arguments[k].value);
-            assert(CE); // byval argument needs to be a concrete pointer
+            ConstantExpr *segment = dyn_cast<ConstantExpr>(arguments[k].pointerSegment);
+            ConstantExpr *address = dyn_cast<ConstantExpr>(arguments[k].value);
+            assert(address); // byval argument needs to be a concrete pointer
 
             ObjectPair op;
-            state.addressSpace.resolveOne(CE, op);
+            state.addressSpace.resolveOne(segment, address, op);
             const ObjectState *osarg = op.second;
             assert(osarg);
             for (unsigned i = 0; i < osarg->size; i++)
@@ -4039,9 +4040,10 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
       // If the argument points to a valid and writable object, concretise it
       // according to the selected policy
+      auto zeroSegment = ConstantExpr::create(0, cvalue->getWidth());
       if (ObjectPair op;
           cvalue->getWidth() == Context::get().getPointerWidth() &&
-          state.addressSpace.resolveOne(cvalue, op) && !op.second->readOnly) {
+          state.addressSpace.resolveOne(zeroSegment, cvalue, op) && !op.second->readOnly) {
         auto *os = state.addressSpace.getWriteable(op.first, op.second);
         os->flushToConcreteStore(*this, state,
                                  ExternalCalls == ExternalCallPolicy::All);
@@ -4101,8 +4103,10 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   // Update external errno state with local state value
   int *errno_addr = getErrnoLocation(state);
   ObjectPair result;
-  bool resolved = state.addressSpace.resolveOne(
-      ConstantExpr::create((uint64_t)errno_addr, Expr::Int64), result);
+  // TODO segment
+  auto segment = ConstantExpr::create(0, Expr::Int64);
+  auto addr = ConstantExpr::create((uint64_t)errno_addr, Expr::Int64);
+  bool resolved = state.addressSpace.resolveOne(segment, addr, result);
   if (!resolved)
     klee_error("Could not resolve memory object for errno");
   ref<Expr> errValueExpr = result.second->read(0, sizeof(*errno_addr) * 8);
@@ -4388,11 +4392,13 @@ void Executor::resolveExact(ExecutionState &state,
   p = optimizer.optimizeExpr(p, true);
   // XXX we may want to be capping this?
   ResolutionList rl;
-  state.addressSpace.resolve(state, solver.get(), p, rl);
+  // TODO segment
+  state.addressSpace.resolve(state, solver.get(), ConstantExpr::alloc(0, p->getWidth()), p, rl);
   
   ExecutionState *unbound = &state;
   for (ResolutionList::iterator it = rl.begin(), ie = rl.end(); 
        it != ie; ++it) {
+    // TODO segment
     ref<Expr> inBounds = EqExpr::create(p, it->first->getBaseExpr());
 
     StatePair branches =
@@ -4479,6 +4485,15 @@ void Executor::executeMemoryOperation(ExecutionState &state,
   ObjectPair op;
   bool success;
   solver->setTimeout(coreSolverTimeout);
+  if (!state.addressSpace.resolveOne(state, solver.get(), addressSegment, addressOffset,
+                                     op, success)) {
+    addressSegment = toConstant(state, addressSegment, "resolveOne failure");
+    addressOffset = toConstant(state, addressOffset, "resolveOne failure");
+    success = state.addressSpace.resolveOne(cast<ConstantExpr>(addressSegment),
+                                            cast<ConstantExpr>(addressOffset),
+                                            op);
+  }
+  solver->setTimeout(time::Span());
 
   bool resolveSingleObject = SingleObjectResolution;
 
@@ -4570,12 +4585,13 @@ void Executor::executeMemoryOperation(ExecutionState &state,
 
   if (!resolveSingleObject) {
     solver->setTimeout(coreSolverTimeout);
-    incomplete = state.addressSpace.resolve(state, solver.get(), address, rl, 0,
-                                            coreSolverTimeout);
+    incomplete = state.addressSpace.resolve(state, solver.get(), addressSegment,
+                                            addressOffset, rl, 0, coreSolverTimeout);
     solver->setTimeout(time::Span());
   } else {
     rl.push_back(op); // we already have the object pair, no need to look for it
   }
+
   // XXX there is some query wasteage here. who cares?
   ExecutionState *unbound = &state;
   
