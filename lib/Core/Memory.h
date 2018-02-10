@@ -136,11 +136,13 @@ public:
   ref<Expr> getOffsetExpr(ref<Expr> pointer) const {
     return SubExpr::create(pointer, getBaseExpr());
   }
-  ref<Expr> getBoundsCheckPointer(ref<Expr> pointer) const {
-    return getBoundsCheckOffset(getOffsetExpr(pointer));
+  ref<Expr> getBoundsCheckPointer(ref<Expr> segment, ref<Expr> offset) const {
+    // TODO segment
+    return getBoundsCheckOffset(getOffsetExpr(offset));
   }
-  ref<Expr> getBoundsCheckPointer(ref<Expr> pointer, size_t bytes) const {
-    return getBoundsCheckOffset(getOffsetExpr(pointer), bytes);
+  ref<Expr> getBoundsCheckPointer(ref<Expr> segment, ref<Expr> offset, unsigned bytes) const {
+    // TODO segment
+    return getBoundsCheckOffset(getOffsetExpr(offset), bytes);
   }
 
   ref<Expr> getBoundsCheckOffset(ref<Expr> offset) const {
