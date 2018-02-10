@@ -757,7 +757,7 @@ void SpecialFunctionHandler::handleCheckMemoryAccess(ExecutionState &state,
                                        cast<ConstantExpr>(address), op)) {
       executor.terminateStateOnProgramError(
           state, "check_memory_access: memory error", StateTerminationType::Ptr,
-          executor.getAddressInfo(state, segment, address));
+          executor.getAddressInfo(state, arguments[0]));
     } else {
       ref<Expr> chk =
         op.first->getBoundsCheckPointer(segment, address,
@@ -766,7 +766,7 @@ void SpecialFunctionHandler::handleCheckMemoryAccess(ExecutionState &state,
         executor.terminateStateOnProgramError(
             state, "check_memory_access: memory error",
             StateTerminationType::Ptr,
-            executor.getAddressInfo(state, segment, address));
+            executor.getAddressInfo(state, arguments[0]));
       }
     }
   }
