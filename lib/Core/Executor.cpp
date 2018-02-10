@@ -4390,23 +4390,23 @@ void Executor::executeFree(ExecutionState &state,
 
 void Executor::resolveExact(ExecutionState &state,
                             ref<Expr> segment,
-                            ref<Expr> p,
+                            ref<Expr> offset,
                             ExactResolutionList &results, 
                             const std::string &name) {
-  p = optimizer.optimizeExpr(p, true);
+  segment = optimizer.optimizeExpr(segment, true);
+  offset = optimizer.optimizeExpr(offset, true);
+
   // XXX we may want to be capping this?
   ResolutionList rl;
-  state.addressSpace.resolve(state, solver.get(), segment, p, rl);
+  state.addressSpace.resolve(state, solver.get(), segment, offset, rl);
   
   ExecutionState *unbound = &state;
   for (ResolutionList::iterator it = rl.begin(), ie = rl.end(); 
        it != ie; ++it) {
-    // TODO segment
-    ref<Expr> inBounds = EqExpr::create(p, it->first->getBaseExpr());
+    ref<Expr> inBounds = it->first->getBoundsCheckPointer(segment, offset);
 
     StatePair branches =
         fork(*unbound, inBounds, true, BranchType::ResolvePointer);
-
     if (branches.first)
       results.push_back(std::make_pair(*it, branches.first));
 
@@ -4416,7 +4416,7 @@ void Executor::resolveExact(ExecutionState &state,
   }
 
   if (unbound) {
-    auto CE = dyn_cast<ConstantExpr>(p);
+    auto CE = dyn_cast<ConstantExpr>(offset);
     if (MemoryManager::isDeterministic && CE) {
       using kdalloc::LocationInfo;
       auto ptr = reinterpret_cast<void *>(CE->getZExtValue());
@@ -4425,13 +4425,13 @@ void Executor::resolveExact(ExecutionState &state,
           li.getBaseAddress() == ptr && name == "free") {
         terminateStateOnProgramError(*unbound, "memory error: double free",
                                      StateTerminationType::Ptr,
-                                     getAddressInfo(*unbound, segment, p));
+                                     getAddressInfo(*unbound, segment, offset));
         return;
       }
     }
     terminateStateOnProgramError(
         *unbound, "memory error: invalid pointer: " + name,
-        StateTerminationType::Ptr, getAddressInfo(*unbound, segment, p));
+        StateTerminationType::Ptr, getAddressInfo(*unbound, segment, offset));
   }
 }
 
@@ -4537,7 +4537,9 @@ void Executor::executeMemoryOperation(ExecutionState &state,
       const MemoryObject *mo = op.first;
 
       if (MaxSymArraySize && mo->size >= MaxSymArraySize) {
-        address = toConstant(state, address, "max-sym-array-size");
+        addressSegment = toConstant(state, addressSegment, "max-sym-array-size");
+        addressOffset = toConstant(state, addressOffset, "max-sym-array-size");
+        address = addressOffset;
       }
 
       ref<Expr> offset = mo->getOffsetExpr(address);
