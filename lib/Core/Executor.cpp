@@ -1887,32 +1887,28 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
       Expr::Width WordSize = Context::get().getPointerWidth();
       if (WordSize == Expr::Int32) {
         // TODO value segment
-        executeMemoryWrite(state, arguments[0].pointerSegment, arguments[0].value,
-                           sf.varargs->getBaseExpr());
+        executeMemoryWrite(state, arguments[0], KValue(sf.varargs->getBaseExpr()));
       } else {
         assert(WordSize == Expr::Int64 && "Unknown word size!");
 
         // x86-64 has quite complicated calling convention. However,
         // instead of implementing it, we can do a simple hack: just
         // make a function believe that all varargs are on stack.
-        // TODO value segment
-        executeMemoryWrite(state, arguments[0].pointerSegment, arguments[0].value,
-                           ConstantExpr::create(48, 32)); // gp_offset
-        executeMemoryWrite(state,
-                           arguments[0].pointerSegment,
-                           AddExpr::create(arguments[0].value,
-                                           ConstantExpr::create(4, 64)),
-                           ConstantExpr::create(304, 32)); // fp_offset
-        executeMemoryWrite(state,
-                           arguments[0].pointerSegment,
-                           AddExpr::create(arguments[0].value,
-                                           ConstantExpr::create(8, 64)),
-                           sf.varargs->getBaseExpr()); // overflow_arg_area
-        executeMemoryWrite(state,
-                           arguments[0].pointerSegment,
-                           AddExpr::create(arguments[0].value,
-                                           ConstantExpr::create(16, 64)),
-                           ConstantExpr::create(0, 64)); // reg_save_area
+        KValue address = arguments[0];
+        executeMemoryWrite(state, address,
+                           KValue(ConstantExpr::create(48, 32))); // gp_offset
+        address.setOffset(AddExpr::create(arguments[0].value,
+                                          ConstantExpr::create(4, 64)));
+        executeMemoryWrite(state, address,
+                           KValue(ConstantExpr::create(304, 32))); // fp_offset
+        address.setOffset(AddExpr::create(arguments[0].value,
+                                          ConstantExpr::create(8, 64)));
+        executeMemoryWrite(state, address,
+                           KValue(sf.varargs->getBaseExpr())); // overflow_arg_area
+        address.setOffset(AddExpr::create(arguments[0].value,
+                                          ConstantExpr::create(16, 64)));
+        executeMemoryWrite(state, address,
+                           KValue(ConstantExpr::create(0, 64))); // reg_save_area
       }
       break;
     }
@@ -2059,12 +2055,11 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
             // TODO segment
             os->write(offsets[k], arguments[k].value);
           } else {
-            ConstantExpr *segment = dyn_cast<ConstantExpr>(arguments[k].pointerSegment);
             ConstantExpr *address = dyn_cast<ConstantExpr>(arguments[k].value);
             assert(address); // byval argument needs to be a concrete pointer
 
             ObjectPair op;
-            state.addressSpace.resolveOne(segment, address, op);
+            state.addressSpace.resolveConstantAddress(arguments[k], op);
             const ObjectState *osarg = op.second;
             assert(osarg);
             for (unsigned i = 0; i < osarg->size; i++)
@@ -2789,14 +2784,13 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
 
   case Instruction::Load: {
     const Cell &baseCell = eval(ki, 0, state);
-    executeMemoryRead(state, baseCell.pointerSegment, baseCell.value, ki);
+    executeMemoryRead(state, baseCell, ki);
     break;
   }
   case Instruction::Store: {
     const Cell &baseCell = eval(ki, 1, state);
     const Cell &valueCell = eval(ki, 0, state);
-    executeMemoryWrite(state, baseCell.pointerSegment, baseCell.value,
-                       valueCell.pointerSegment, valueCell.value);
+    executeMemoryWrite(state, baseCell, valueCell);
     break;
   }
 
@@ -3724,7 +3718,7 @@ void Executor::run(ExecutionState &initialState) {
 }
 
 std::string Executor::getAddressInfo(ExecutionState &state,
-                                     KValue address) const{
+                                     const KValue &address) const{
   std::string Str;
   llvm::raw_string_ostream info(Str);
   // TODO segment
@@ -4107,7 +4101,10 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   // TODO segment
   auto segment = ConstantExpr::create(0, Expr::Int64);
   auto addr = ConstantExpr::create((uint64_t)errno_addr, Expr::Int64);
-  bool resolved = state.addressSpace.resolveOne(segment, addr, result);
+  bool resolved;
+  state.addressSpace.resolveOne(state, solver,
+                                KValue(segment, addr),
+                                result, resolved);
   if (!resolved)
     klee_error("Could not resolve memory object for errno");
   ref<Expr> errValueExpr = result.second->read(0, sizeof(*errno_addr) * 8);
@@ -4352,19 +4349,19 @@ void Executor::executeAlloc(ExecutionState &state,
 }
 
 void Executor::executeFree(ExecutionState &state,
-                           ref<Expr> segment,
-                           ref<Expr> address,
+                           const KValue &address,
                            KInstruction *target) {
-  address = optimizer.optimizeExpr(address, true);
+  auto addressOptim = KValue(address.getSegment(),
+                             optimizer.optimizeExpr(address.getOffset(), true));
   StatePair zeroPointer =
-      fork(state, Expr::createIsZero(address), true, BranchType::Free);
+      fork(state, addressOptim.createIsZero(), true, BranchType::Free);
   if (zeroPointer.first) {
     if (target)
       bindLocal(target, *zeroPointer.first, Expr::createPointer(0));
   }
   if (zeroPointer.second) { // address != 0
     ExactResolutionList rl;
-    resolveExact(*zeroPointer.second, segment, address, rl, "free");
+    resolveExact(*zeroPointer.second, addressOptim, rl, "free");
     
     for (Executor::ExactResolutionList::iterator it = rl.begin(), 
            ie = rl.end(); it != ie; ++it) {
@@ -4372,11 +4369,11 @@ void Executor::executeFree(ExecutionState &state,
       if (mo->isLocal) {
         terminateStateOnProgramError(*it->second, "free of alloca",
                                      StateTerminationType::Free,
-                                     getAddressInfo(*it->second, KValue(segment, address)));
+                                     getAddressInfo(*it->second, addressOptim));
       } else if (mo->isGlobal) {
         terminateStateOnProgramError(*it->second, "free of global",
                                      StateTerminationType::Free,
-                                     getAddressInfo(*it->second, KValue(segment, address)));
+                                     getAddressInfo(*it->second, addressOptim));
       } else {
         it->second->deallocate(mo);
         it->second->addressSpace.unbindObject(mo);
@@ -4388,21 +4385,20 @@ void Executor::executeFree(ExecutionState &state,
 }
 
 void Executor::resolveExact(ExecutionState &state,
-                            ref<Expr> segment,
-                            ref<Expr> offset,
+                            const KValue &address,
                             ExactResolutionList &results, 
                             const std::string &name) {
-  segment = optimizer.optimizeExpr(segment, true);
-  offset = optimizer.optimizeExpr(offset, true);
+  auto addressOptim = KValue(address.getSegment(),
+                             optimizer.optimizeExpr(address.getOffset(), true));
 
   // XXX we may want to be capping this?
   ResolutionList rl;
-  state.addressSpace.resolve(state, solver.get(), segment, offset, rl);
+  state.addressSpace.resolve(state, solver.get(), addressOptim, rl);
   
   ExecutionState *unbound = &state;
   for (ResolutionList::iterator it = rl.begin(), ie = rl.end(); 
        it != ie; ++it) {
-    ref<Expr> inBounds = it->first->getBoundsCheckPointer(segment, offset);
+    ref<Expr> inBounds = it->first->getBoundsCheckPointer(addressOptim);
 
     StatePair branches =
         fork(*unbound, inBounds, true, BranchType::ResolvePointer);
@@ -4415,7 +4411,7 @@ void Executor::resolveExact(ExecutionState &state,
   }
 
   if (unbound) {
-    auto CE = dyn_cast<ConstantExpr>(offset);
+    auto CE = dyn_cast<ConstantExpr>(addressOptim.getOffset());
     if (MemoryManager::isDeterministic && CE) {
       using kdalloc::LocationInfo;
       auto ptr = reinterpret_cast<void *>(CE->getZExtValue());
@@ -4424,90 +4420,70 @@ void Executor::resolveExact(ExecutionState &state,
           li.getBaseAddress() == ptr && name == "free") {
         terminateStateOnProgramError(*unbound, "memory error: double free",
                                      StateTerminationType::Ptr,
-                                     getAddressInfo(*unbound, KValue(segment, offset)));
+                                     getAddressInfo(*unbound, addressOptim));
         return;
       }
     }
     terminateStateOnProgramError(
         *unbound, "memory error: invalid pointer: " + name,
-        StateTerminationType::Ptr, getAddressInfo(*unbound, KValue(segment, offset)));
+        StateTerminationType::Ptr, getAddressInfo(*unbound, addressOptim));
   }
 }
 
 void Executor::executeMemoryRead(ExecutionState &state,
-                                 ref<Expr> addressSegment,
-                                 ref<Expr> addressOffset,
+                                 const KValue &address,
                                  KInstruction *target) {
-  executeMemoryOperation(state, false, addressSegment, addressOffset, 0, 0, target);
+  executeMemoryOperation(state, false, address, KValue(), target);
 }
 
 void Executor::executeMemoryWrite(ExecutionState &state,
-                                  ref<Expr> addressSegment,
-                                  ref<Expr> addressOffset,
-                                  ref<Expr> valueOffset) {
-  ref<Expr> valueSegment = ConstantExpr::create(0, valueOffset->getWidth());
-  executeMemoryWrite(state, addressSegment, addressOffset, valueSegment, valueOffset);
-}
-
-void Executor::executeMemoryWrite(ExecutionState &state,
-                                  ref<Expr> addressSegment,
-                                  ref<Expr> addressOffset,
-                                  ref<Expr> valueSegment,
-                                  ref<Expr> valueOffset) {
-  executeMemoryOperation(state, true, addressSegment, addressOffset,
-                         valueSegment, valueOffset, 0);
+                                  const KValue &address,
+                                  const KValue &value) {
+  executeMemoryOperation(state, true, address, value, 0);
 }
 void Executor::executeMemoryOperation(ExecutionState &state,
                                       bool isWrite,
-                                      ref<Expr> addressSegment,
-                                      ref<Expr> addressOffset,
-                                      ref<Expr> valueSegment, /* undef if read */
-                                      ref<Expr> valueOffset, /* undef if read */
+                                      KValue address,
+                                      KValue value, /* undef if read */
                                       KInstruction *target /* undef if write */) {
-  Expr::Width type = (isWrite ? valueOffset->getWidth() :
+  Expr::Width type = (isWrite ? value.getWidth() :
                      getWidthForLLVMType(target->inst->getType()));
   unsigned bytes = Expr::getMinBytesForWidth(type);
 
   if (SimplifySymIndices) {
-    if (!isa<ConstantExpr>(addressSegment))
-      addressSegment = ConstraintManager::simplifyExpr(state.constraints, addressSegment);
-    if (!isa<ConstantExpr>(addressOffset))
-      addressOffset = ConstraintManager::simplifyExpr(state.constraints, addressOffset);
+    address.set(ConstraintManager::simplifyExpr(state.constraints, address.getSegment()),
+                ConstraintManager::simplifyExpr(state.constraints, address.getOffset()));
     if (isWrite) {
-      if (!isa<ConstantExpr>(valueSegment))
-        valueSegment = ConstraintManager::simplifyExpr(state.constraints, valueSegment);
-      if (!isa<ConstantExpr>(valueOffset))
-        valueOffset = ConstraintManager::simplifyExpr(state.constraints, valueOffset);
+      value.set(ConstraintManager::simplifyExpr(state.constraints, value.getSegment()),
+                ConstraintManager::simplifyExpr(state.constraints, value.getOffset()));
     }
   }
 
-  ref<Expr> address = optimizer.optimizeExpr(addressOffset, true);
-  ref<Expr> value = valueOffset;
+  address = KValue(address.getSegment(),
+                   optimizer.optimizeExpr(address.getOffset(), true));
 
   ObjectPair op;
   bool success;
   solver->setTimeout(coreSolverTimeout);
-  if (!state.addressSpace.resolveOne(state, solver.get(), addressSegment, addressOffset,
-                                     op, success)) {
-    addressSegment = toConstant(state, addressSegment, "resolveOne failure");
-    addressOffset = toConstant(state, addressOffset, "resolveOne failure");
-    success = state.addressSpace.resolveOne(cast<ConstantExpr>(addressSegment),
-                                            cast<ConstantExpr>(addressOffset),
-                                            op);
+  if (!state.addressSpace.resolveOne(state, solver.get(), address, op, success)) {
+    address.set(toConstant(state, address.getSegment(), "resolveOne failure"),
+                toConstant(state, address.getOffset(), "resolveOne failure"));
+    success = state.addressSpace.resolveConstantAddress(address, op);
   }
   solver->setTimeout(time::Span());
 
   bool resolveSingleObject = SingleObjectResolution;
 
-  if (resolveSingleObject && !isa<ConstantExpr>(address)) {
+  if (resolveSingleObject && !isa<ConstantExpr>(address.getOffset())) {
     // Address is symbolic
-
     resolveSingleObject = false;
-    auto base_it = state.base_addrs.find(address);
+    auto base_it = state.base_addrs.find(address.getOffset());
     if (base_it != state.base_addrs.end()) {
       // Concrete address found in the map, now find the associated memory
       // object
-      if (!state.addressSpace.resolveOne(state, solver.get(), base_it->second, op,
+      auto zeroSeg = ConstantExpr::create(0, base_it->second->getWidth());
+      KValue baseAddr(zeroSeg, base_it->second);
+      if (!state.addressSpace.resolveOne(state, solver.get(), baseAddr, op,
                                          success) ||
           !success) {
         klee_warning("Failed to resolve concrete address from the base_addrs "
@@ -4526,22 +4502,15 @@ void Executor::executeMemoryOperation(ExecutionState &state,
   }
 
   if (!resolveSingleObject) {
-    if (!state.addressSpace.resolveOne(state, solver.get(), address, op, success)) {
-      address = toConstant(state, address, "resolveOne failure");
-      success = state.addressSpace.resolveOne(cast<ConstantExpr>(address), op);
-    }
-    solver->setTimeout(time::Span());
-
     if (success) {
       const MemoryObject *mo = op.first;
 
       if (MaxSymArraySize && mo->size >= MaxSymArraySize) {
-        addressSegment = toConstant(state, addressSegment, "max-sym-array-size");
-        addressOffset = toConstant(state, addressOffset, "max-sym-array-size");
-        address = addressOffset;
+        address.set(toConstant(state, address.getSegment(), "max-sym-array-size"),
+                    toConstant(state, address.getOffset(), "max-sym-array-size"));
       }
 
-      ref<Expr> offset = mo->getOffsetExpr(address);
+      ref<Expr> offset = mo->getOffsetExpr(address.getOffset());
       ref<Expr> check = mo->getBoundsCheckOffset(offset, bytes);
       check = optimizer.optimizeExpr(check, true);
 
@@ -4564,7 +4533,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
                                          StateTerminationType::ReadOnly);
           } else {
             ObjectState *wos = state.addressSpace.getWriteable(mo, os);
-            wos->write(*this, state, offset, value);
+            wos->write(*this, state, offset, value.getOffset());
           }
         } else {
           ref<Expr> result = os->read(*this, state, offset, type);
@@ -4583,18 +4552,20 @@ void Executor::executeMemoryOperation(ExecutionState &state,
   // we are on an error path (no resolution, multiple resolution, one
   // resolution with out of bounds), or we do a single object resolution
 
-  address = optimizer.optimizeExpr(address, true);
+  auto addressOptim = KValue(address.getSegment(),
+                             optimizer.optimizeExpr(address.getOffset(), true));
   ResolutionList rl;
   bool incomplete = false;
 
   if (!resolveSingleObject) {
     solver->setTimeout(coreSolverTimeout);
-    incomplete = state.addressSpace.resolve(state, solver.get(), addressSegment,
-                                            addressOffset, rl, 0, coreSolverTimeout);
+    incomplete = state.addressSpace.resolve(state, solver.get(), addressOptim,
+                                            rl, 0, coreSolverTimeout);
     solver->setTimeout(time::Span());
   } else {
     rl.push_back(op); // we already have the object pair, no need to look for it
   }
+
 
   // XXX there is some query wasteage here. who cares?
   ExecutionState *unbound = &state;
@@ -4602,7 +4573,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
   for (ResolutionList::iterator i = rl.begin(), ie = rl.end(); i != ie; ++i) {
     const MemoryObject *mo = i->first;
     const ObjectState *os = i->second;
-    ref<Expr> inBounds = mo->getBoundsCheckPointer(addressSegment, addressOffset, bytes);
+    ref<Expr> inBounds = mo->getBoundsCheckPointer(addressOptim, bytes);
     
     StatePair branches = fork(*unbound, inBounds, true, BranchType::MemOp);
     ExecutionState *bound = branches.first;
@@ -4615,10 +4586,10 @@ void Executor::executeMemoryOperation(ExecutionState &state,
                                        StateTerminationType::ReadOnly);
         } else {
           ObjectState *wos = bound->addressSpace.getWriteable(mo, os);
-          wos->write(*this, state, mo->getOffsetExpr(address), value);
+          wos->write(*this, state, mo->getOffsetExpr(addressOptim.getOffset()), value.getOffset());
         }
       } else {
-        ref<Expr> result = os->read(*this, state, mo->getOffsetExpr(address), type);
+        ref<Expr> result = os->read(*this, state, mo->getOffsetExpr(addressOptim.getOffset()), type);
         bindLocal(target, *bound, result);
       }
     }
@@ -4633,13 +4604,13 @@ void Executor::executeMemoryOperation(ExecutionState &state,
     if (incomplete) {
       terminateStateOnSolverError(*unbound, "Query timed out (resolve).");
     } else {
-      if (auto CE = dyn_cast<ConstantExpr>(address)) {
+      if (auto CE = dyn_cast<ConstantExpr>(address.getOffset())) {
         std::uintptr_t ptrval = CE->getZExtValue();
         auto ptr = reinterpret_cast<void *>(ptrval);
         if (ptrval < MemoryManager::pageSize) {
           terminateStateOnProgramError(
               *unbound, "memory error: null page access",
-              StateTerminationType::Ptr, getAddressInfo(*unbound, KValue(addressSegment, address)));
+              StateTerminationType::Ptr, getAddressInfo(*unbound, address));
           return;
         } else if (MemoryManager::isDeterministic) {
           using kdalloc::LocationInfo;
@@ -4649,12 +4620,13 @@ void Executor::executeMemoryOperation(ExecutionState &state,
             // address), the object is quarantined.
             auto base = reinterpret_cast<std::uintptr_t>(li.getBaseAddress());
             auto baseExpr = Expr::createPointer(base);
-            ObjectPair op;
+            ObjectPair baseOp;
             auto zeroSeg = ConstantExpr::create(0, baseExpr->getWidth());
-            if (!unbound->addressSpace.resolveOne(zeroSeg, cast<ConstantExpr>(baseExpr), op)) {
+            if (!unbound->addressSpace.resolveConstantAddress(
+                    KValue(zeroSeg, cast<ConstantExpr>(baseExpr)), baseOp)) {
               terminateStateOnProgramError(
                   *unbound, "memory error: use after free",
-                  StateTerminationType::Ptr, getAddressInfo(*unbound, KValue(addressSegment, address)));
+                  StateTerminationType::Ptr, getAddressInfo(*unbound, address));
               return;
             }
           }
@@ -4662,7 +4634,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
       }
       terminateStateOnProgramError(
           *unbound, "memory error: out of bound pointer",
-          StateTerminationType::Ptr, getAddressInfo(*unbound, KValue(addressSegment, addressOffset)));
+          StateTerminationType::Ptr, getAddressInfo(*unbound, address));
     }
   }
 }
