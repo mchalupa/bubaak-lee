@@ -625,7 +625,7 @@ void Executor::initializeGlobalObject(ExecutionState &state, ObjectState *os,
   } else if (isa<ConstantAggregateZero>(c)) {
     unsigned i, size = targetData->getTypeStoreSize(c->getType());
     for (i=0; i<size; i++)
-      os->write8(offset+i, (uint8_t) 0);
+      os->write8(offset+i, (uint8_t)0, (uint8_t)0);
   } else if (const ConstantArray *ca = dyn_cast<ConstantArray>(c)) {
     unsigned elementSize =
       targetData->getTypeStoreSize(ca->getType()->getElementType());
@@ -654,7 +654,8 @@ void Executor::initializeGlobalObject(ExecutionState &state, ObjectState *os,
     if (StoreBits > C->getWidth())
       C = C->ZExt(StoreBits);
 
-    os->write(offset, C);
+    // TODO offset
+    os->write(offset, KValue(C));
   }
 }
 
@@ -665,7 +666,7 @@ MemoryObject * Executor::addExternalObject(ExecutionState &state,
                                   size, nullptr);
   ObjectState *os = bindObjectInState(state, mo, false);
   for(unsigned i = 0; i < size; i++)
-    os->write8(i, ((uint8_t*)addr)[i]);
+    os->write8(i, (uint8_t)0, ((uint8_t*)addr)[i]);
   if(isReadOnly)
     os->setReadOnly(true);  
   return mo;
@@ -858,7 +859,8 @@ void Executor::initializeGlobalObjects(ExecutionState &state) {
                    static_cast<int>(v.getName().size()), v.getName().data());
       }
       for (unsigned offset = 0; offset < mo->size; offset++) {
-        os->write8(offset, static_cast<unsigned char *>(addr)[offset]);
+        // TODO: segment
+        os->write8(offset, 0, static_cast<unsigned char *>(addr)[offset]);
       }
     } else if (v.hasInitializer()) {
       initializeGlobalObject(state, os, v.getInitializer(), 0);
@@ -1583,7 +1585,8 @@ MemoryObject *Executor::serializeLandingpad(ExecutionState &state,
       memory->allocate(serialized.size(), true, false, &state, nullptr, 1);
   ObjectState *os = bindObjectInState(state, mo, false);
   for (unsigned i = 0; i < serialized.size(); i++) {
-    os->write8(i, serialized[i]);
+    // TODO: segment
+    os->write8(i, 0, serialized[i]);
   }
 
   return mo;
@@ -1990,7 +1993,7 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
           Type *t = cb.getParamByValType(k);
           argWidth = kmodule->targetData->getTypeSizeInBits(t);
         } else {
-          argWidth = arguments[k].value->getWidth();
+          argWidth = arguments[k].getWidth();
         }
 
         MaybeAlign ma = cb.getParamAlign(k);
@@ -2045,8 +2048,7 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
 
         for (unsigned k = funcArgs; k < callingArgs; k++) {
           if (!cb.isByValArgument(k)) {
-            // TODO segment
-            os->write(offsets[k], arguments[k].value);
+            os->write(offsets[k], arguments[k]);
           } else {
             ConstantExpr *address = dyn_cast<ConstantExpr>(arguments[k].value);
             assert(address); // byval argument needs to be a concrete pointer
@@ -4090,8 +4092,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
                                 result, resolved);
   if (!resolved)
     klee_error("Could not resolve memory object for errno");
-  ref<Expr> errValueExpr = result.second->read(0, sizeof(*errno_addr) * 8);
-  ConstantExpr *errnoValue = dyn_cast<ConstantExpr>(errValueExpr);
+  auto errValueExpr = result.second->read(0, sizeof(*errno_addr) * 8);
+  ConstantExpr *errnoValue = dyn_cast<ConstantExpr>(errValueExpr.getValue());
   if (!errnoValue) {
     terminateStateOnExecError(state,
                               "external call with errno value symbolic: " +
@@ -4237,6 +4239,7 @@ void Executor::executeAlloc(ExecutionState &state,
       if (reallocFrom) {
         unsigned count = std::min(reallocFrom->size, os->size);
         for (unsigned i=0; i<count; i++)
+          // TODO segment
           os->write(i, reallocFrom->read8(i));
         const MemoryObject *reallocObject = reallocFrom->getObject();
         state.deallocate(reallocObject);
@@ -4518,16 +4521,18 @@ void Executor::executeMemoryOperation(ExecutionState &state,
                                          StateTerminationType::ReadOnly);
           } else {
             ObjectState *wos = state.addressSpace.getWriteable(mo, os);
-            wos->write(*this, state, offset, value.getOffset());
+            // TODO segment
+            wos->write(offset, value);
           }
         } else {
-          ref<Expr> result = os->read(*this, state, offset, type);
+          KValue result = os->read(offset, type);
 
-          if (interpreterOpts.MakeConcreteSymbolic)
-            result = replaceReadWithSymbolic(state, result);
+          if (interpreterOpts.MakeConcreteSymbolic) {
+            result.set(replaceReadWithSymbolic(state, result.getSegment()),
+                       replaceReadWithSymbolic(state, result.getOffset()));
+          }
 
-          // TODO segment
-          bindLocal(target, state, KValue(result));
+          bindLocal(target, state, result);
         }
 
         return;
@@ -4572,12 +4577,12 @@ void Executor::executeMemoryOperation(ExecutionState &state,
                                        StateTerminationType::ReadOnly);
         } else {
           ObjectState *wos = bound->addressSpace.getWriteable(mo, os);
-          wos->write(*this, state, mo->getOffsetExpr(addressOptim.getOffset()), value.getOffset());
+          // TODO segment
+          wos->write(mo->getOffsetExpr(addressOptim.getOffset()), value);
         }
       } else {
-        ref<Expr> result = os->read(*this, state, mo->getOffsetExpr(addressOptim.getOffset()), type);
-        // TODO segment
-        bindLocal(target, *bound, KValue(result));
+        KValue result = os->read(mo->getOffsetExpr(addressOptim.getOffset()), type);
+        bindLocal(target, *bound, result);
       }
     }
 
@@ -4698,7 +4703,8 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
         terminateStateOnUserError(state, "replay size mismatch");
       } else {
         for (unsigned i=0; i<mo->size; i++)
-          os->write8(i, obj->bytes[i]);
+          // TODO segment
+          os->write8(i, 0, obj->bytes[i]);
       }
     }
   }
@@ -4776,7 +4782,7 @@ void Executor::runFunctionAsMain(Function *f,
     for (int i=0; i<argc+1+envc+1+1; i++) {
       if (i==argc || i>=argc+1+envc) {
         // Write NULL pointer
-        argvOS->write(i * NumPtrBytes, Expr::createPointer(0));
+        argvOS->write(i * NumPtrBytes, KValue(Expr::createPointer(0)));
       } else {
         char *s = i<argc ? argv[i] : envp[i-(argc+1)];
         int j, len = strlen(s);
@@ -4788,11 +4794,13 @@ void Executor::runFunctionAsMain(Function *f,
         if (!arg)
           klee_error("Could not allocate memory for function arguments");
         ObjectState *os = bindObjectInState(*state, arg, false);
+        // TODO segment
         for (j=0; j<len+1; j++)
-          os->write8(j, s[j]);
+          os->write8(j, 0, s[j]);
 
         // Write pointer to newly allocated and initialised argv/envp c-string
-        argvOS->write(i * NumPtrBytes, arg->getBaseExpr());
+        // TODO segment
+        argvOS->write(i * NumPtrBytes, KValue(arg->getBaseExpr()));
       }
     }
   }
@@ -4940,7 +4948,7 @@ void Executor::doImpliedValueConcretization(ExecutionState &state,
         assert(!os->readOnly && 
                "not possible? read only object with static read?");
         ObjectState *wos = state.addressSpace.getWriteable(mo, os);
-        wos->write(*this, state, CE, it->second);
+        wos->write(CE, KValue(it->second));
       }
     }
   }

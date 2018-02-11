@@ -78,7 +78,7 @@ void MemoryObject::getAllocInfo(std::string &result) const {
 
 /***/
 
-ObjectState::ObjectState(const MemoryObject *mo)
+ObjectStatePlane::ObjectStatePlane(const MemoryObject *mo)
   : copyOnWriteOwner(0),
     object(mo),
     concreteStore(new uint8_t[mo->size]),
@@ -98,7 +98,7 @@ ObjectState::ObjectState(const MemoryObject *mo)
 }
 
 
-ObjectState::ObjectState(const MemoryObject *mo, const Array *array)
+ObjectStatePlane::ObjectStatePlane(const MemoryObject *mo, const Array *array)
   : copyOnWriteOwner(0),
     object(mo),
     concreteStore(new uint8_t[mo->size]),
@@ -112,7 +112,7 @@ ObjectState::ObjectState(const MemoryObject *mo, const Array *array)
   memset(concreteStore, 0, size);
 }
 
-ObjectState::ObjectState(const ObjectState &os) 
+ObjectStatePlane::ObjectStatePlane(const ObjectStatePlane &os)
   : copyOnWriteOwner(0),
     object(os.object),
     concreteStore(new uint8_t[os.size]),
@@ -132,21 +132,21 @@ ObjectState::ObjectState(const ObjectState &os)
   memcpy(concreteStore, os.concreteStore, size * sizeof(*concreteStore));
 }
 
-ObjectState::~ObjectState() {
+ObjectStatePlane::~ObjectStatePlane() {
   delete concreteMask;
   delete unflushedMask;
   delete[] knownSymbolics;
   delete[] concreteStore;
 }
 
-ArrayCache *ObjectState::getArrayCache() const {
+ArrayCache *ObjectStatePlane::getArrayCache() const {
   assert(object && "object was NULL");
   return object->parent->getArrayCache();
 }
 
 /***/
 
-const UpdateList &ObjectState::getUpdates() const {
+const UpdateList &ObjectStatePlane::getUpdates() const {
   // Constant arrays are created lazily.
   if (!updates.root) {
     // Collect the list of writes, with the oldest writes first.
@@ -197,7 +197,7 @@ const UpdateList &ObjectState::getUpdates() const {
   return updates;
 }
 
-void ObjectState::flushToConcreteStore(Executor &executor,
+void ObjectStatePlane::flushToConcreteStore(Executor &executor,
                                        ExecutionState &state, bool concretize) {
   for (size_t i = 0; i < size; i++) {
     if (isByteConcrete(i))
@@ -210,7 +210,7 @@ void ObjectState::flushToConcreteStore(Executor &executor,
   }
 }
 
-void ObjectState::makeConcrete() {
+void ObjectStatePlane::makeConcrete() {
   delete concreteMask;
   delete unflushedMask;
   delete[] knownSymbolics;
@@ -219,7 +219,7 @@ void ObjectState::makeConcrete() {
   knownSymbolics = nullptr;
 }
 
-void ObjectState::makeSymbolic() {
+void ObjectStatePlane::makeSymbolic() {
   assert(!updates.head &&
          "XXX makeSymbolic of objects with symbolic values is unsupported");
 
@@ -231,12 +231,12 @@ void ObjectState::makeSymbolic() {
   }
 }
 
-void ObjectState::initializeToZero() {
+void ObjectStatePlane::initializeToZero() {
   makeConcrete();
   memset(concreteStore, 0, size);
 }
 
-void ObjectState::initializeToRandom() {  
+void ObjectStatePlane::initializeToRandom() {
   makeConcrete();
   for (size_t i = 0; i < size; i++) {
     // randomly selected by 256 sided die
@@ -252,14 +252,14 @@ isByteConcrete(i) => !isByteKnownSymbolic(i)
 isByteUnflushed(i) => (isByteConcrete(i) || isByteKnownSymbolic(i))
  */
 
-void ObjectState::fastRangeCheckOffset(ref<Expr> offset,
+void ObjectStatePlane::fastRangeCheckOffset(ref<Expr> offset,
                                        size_t *base_r,
                                        size_t *size_r) const {
   *base_r = 0;
   *size_r = size;
 }
 
-void ObjectState::flushRangeForRead(size_t rangeBase,
+void ObjectStatePlane::flushRangeForRead(size_t rangeBase,
                                     size_t rangeSize) const {
   if (!unflushedMask)
     unflushedMask = new BitArray(size, true);
@@ -281,7 +281,7 @@ void ObjectState::flushRangeForRead(size_t rangeBase,
   }
 }
 
-void ObjectState::flushRangeForWrite(size_t rangeBase, size_t rangeSize) {
+void ObjectStatePlane::flushRangeForWrite(size_t rangeBase, size_t rangeSize) {
   if (!unflushedMask)
     unflushedMask = new BitArray(size, true);
 
@@ -312,35 +312,35 @@ void ObjectState::flushRangeForWrite(size_t rangeBase, size_t rangeSize) {
   }
 }
 
-bool ObjectState::isByteConcrete(size_t offset) const {
+bool ObjectStatePlane::isByteConcrete(size_t offset) const {
   return !concreteMask || concreteMask->get(offset);
 }
 
-bool ObjectState::isByteUnflushed(size_t offset) const {
+bool ObjectStatePlane::isByteUnflushed(size_t offset) const {
   return !unflushedMask || unflushedMask->get(offset);
 }
 
-bool ObjectState::isByteKnownSymbolic(size_t offset) const {
+bool ObjectStatePlane::isByteKnownSymbolic(size_t offset) const {
   return knownSymbolics && knownSymbolics[offset].get();
 }
 
-void ObjectState::markByteConcrete(size_t offset) {
+void ObjectStatePlane::markByteConcrete(size_t offset) {
   if (concreteMask)
     concreteMask->set(offset);
 }
 
-void ObjectState::markByteSymbolic(size_t offset) {
+void ObjectStatePlane::markByteSymbolic(size_t offset) {
   if (!concreteMask)
     concreteMask = new BitArray(size, true);
   concreteMask->unset(offset);
 }
 
-void ObjectState::markByteUnflushed(size_t offset) {
+void ObjectStatePlane::markByteUnflushed(size_t offset) {
   if (unflushedMask)
     unflushedMask->set(offset);
 }
 
-void ObjectState::markByteFlushed(size_t offset) {
+void ObjectStatePlane::markByteFlushed(size_t offset) {
   if (!unflushedMask) {
     unflushedMask = new BitArray(size, false);
   } else {
@@ -348,7 +348,7 @@ void ObjectState::markByteFlushed(size_t offset) {
   }
 }
 
-void ObjectState::setKnownSymbolic(size_t offset,
+void ObjectStatePlane::setKnownSymbolic(size_t offset,
                                    Expr *value /* can be null */) {
   if (knownSymbolics) {
     knownSymbolics[offset] = value;
@@ -362,7 +362,7 @@ void ObjectState::setKnownSymbolic(size_t offset,
 
 /***/
 
-ref<Expr> ObjectState::read8(size_t offset) const {
+ref<Expr> ObjectStatePlane::read8(size_t offset) const {
   if (isByteConcrete(offset)) {
     return ConstantExpr::create(concreteStore[offset], Expr::Int8);
   } else if (isByteKnownSymbolic(offset)) {
@@ -375,7 +375,7 @@ ref<Expr> ObjectState::read8(size_t offset) const {
   }    
 }
 
-ref<Expr> ObjectState::read8(Executor &executor, ExecutionState &state, ref<Expr> offset) const {
+ref<Expr> ObjectStatePlane::read8(Executor &executor, ExecutionState &state, ref<Expr> offset) const {
   assert(!isa<ConstantExpr>(offset) &&
          "constant offset passed to symbolic read8");
 
@@ -405,7 +405,7 @@ ref<Expr> ObjectState::read8(Executor &executor, ExecutionState &state, ref<Expr
   return ReadExpr::create(getUpdates(), ZExtExpr::create(offset, Expr::Int32));
 }
 
-void ObjectState::write8(size_t offset, uint8_t value) {
+void ObjectStatePlane::write8(size_t offset, uint8_t value) {
   //assert(read_only == false && "writing to read-only object!");
   concreteStore[offset] = value;
   setKnownSymbolic(offset, 0);
@@ -414,7 +414,7 @@ void ObjectState::write8(size_t offset, uint8_t value) {
   markByteUnflushed(offset);
 }
 
-void ObjectState::write8(size_t offset, ref<Expr> value) {
+void ObjectStatePlane::write8(size_t offset, ref<Expr> value) {
   // can happen when ExtractExpr special cases
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(value)) {
     write8(offset, (uint8_t) CE->getZExtValue(8));
@@ -426,7 +426,7 @@ void ObjectState::write8(size_t offset, ref<Expr> value) {
   }
 }
 
-void ObjectState::write8(Executor &executor, ExecutionState &state, ref<Expr> offset, ref<Expr> value) {
+void ObjectStatePlane::write8(Executor &executor, ExecutionState &state, ref<Expr> offset, ref<Expr> value) {
   assert(!isa<ConstantExpr>(offset) &&
          "constant offset passed to symbolic write8");
   size_t base, size;
@@ -456,7 +456,7 @@ void ObjectState::write8(Executor &executor, ExecutionState &state, ref<Expr> of
 
 /***/
 
-ref<Expr> ObjectState::read(Executor &executor, ExecutionState &state,
+ref<Expr> ObjectStatePlane::read(Executor &executor, ExecutionState &state,
                             ref<Expr> offset, Expr::Width width) const {
   // Truncate offset to 32-bits.
   offset = ZExtExpr::create(offset, Expr::Int32);
@@ -484,7 +484,7 @@ ref<Expr> ObjectState::read(Executor &executor, ExecutionState &state,
   return Res;
 }
 
-ref<Expr> ObjectState::read(size_t offset, Expr::Width width) const {
+ref<Expr> ObjectStatePlane::read(size_t offset, Expr::Width width) const {
   // Treat bool specially, it is the only non-byte sized write we allow.
   if (width == Expr::Bool)
     return ExtractExpr::create(read8(offset), 0, Expr::Bool);
@@ -502,7 +502,7 @@ ref<Expr> ObjectState::read(size_t offset, Expr::Width width) const {
   return Res;
 }
 
-void ObjectState::write(Executor &executor, ExecutionState &state,
+void ObjectStatePlane::write(Executor &executor, ExecutionState &state,
                         ref<Expr> offset, ref<Expr> value) {
   // Truncate offset to 32-bits.
   offset = ZExtExpr::create(offset, Expr::Int32);
@@ -530,7 +530,7 @@ void ObjectState::write(Executor &executor, ExecutionState &state,
   }
 }
 
-void ObjectState::write(size_t offset, ref<Expr> value) {
+void ObjectStatePlane::write(size_t offset, ref<Expr> value) {
   // Check for writes of constant values.
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(value)) {
     Expr::Width w = CE->getWidth();
@@ -563,7 +563,7 @@ void ObjectState::write(size_t offset, ref<Expr> value) {
   }
 } 
 
-void ObjectState::write16(size_t offset, uint16_t value) {
+void ObjectStatePlane::write16(size_t offset, uint16_t value) {
   size_t NumBytes = 2;
   for (size_t i = 0; i != NumBytes; ++i) {
     size_t idx = Context::get().isLittleEndian() ? i : (NumBytes - i - 1);
@@ -571,7 +571,7 @@ void ObjectState::write16(size_t offset, uint16_t value) {
   }
 }
 
-void ObjectState::write32(size_t offset, uint32_t value) {
+void ObjectStatePlane::write32(size_t offset, uint32_t value) {
   size_t NumBytes = 4;
   for (size_t i = 0; i != NumBytes; ++i) {
     size_t idx = Context::get().isLittleEndian() ? i : (NumBytes - i - 1);
@@ -579,7 +579,7 @@ void ObjectState::write32(size_t offset, uint32_t value) {
   }
 }
 
-void ObjectState::write64(size_t offset, uint64_t value) {
+void ObjectStatePlane::write64(size_t offset, uint64_t value) {
   size_t NumBytes = 8;
   for (size_t i = 0; i != NumBytes; ++i) {
     size_t idx = Context::get().isLittleEndian() ? i : (NumBytes - i - 1);
@@ -587,7 +587,7 @@ void ObjectState::write64(size_t offset, uint64_t value) {
   }
 }
 
-void ObjectState::print() const {
+void ObjectStatePlane::print() const {
   llvm::errs() << "-- ObjectState --\n";
   llvm::errs() << "\tMemoryObject ID: " << object->id << "\n";
   llvm::errs() << "\tRoot Object: " << updates.root << "\n";
@@ -608,4 +608,88 @@ void ObjectState::print() const {
   for (const auto *un = updates.head.get(); un; un = un->next.get()) {
     llvm::errs() << "\t\t[" << un->index << "] = " << un->value << "\n";
   }
+}
+
+/****/
+
+ObjectState::ObjectState(const MemoryObject *mo)
+  : copyOnWriteOwner(0),
+    object(mo),
+    segmentPlane(mo),
+    offsetPlane(mo),
+    size(mo->size),
+    readOnly(false) {
+}
+
+
+ObjectState::ObjectState(const MemoryObject *mo, const Array *array)
+  : copyOnWriteOwner(0),
+    object(mo),
+    segmentPlane(mo),
+    offsetPlane(mo, array),
+    size(mo->size),
+    readOnly(false) {
+  segmentPlane.initializeToZero();
+}
+
+ObjectState::ObjectState(const ObjectState &os)
+  : copyOnWriteOwner(0),
+    object(os.object),
+    segmentPlane(os.segmentPlane),
+    offsetPlane(os.offsetPlane),
+    size(os.size),
+    readOnly(false) {
+}
+
+KValue ObjectState::read8(unsigned offset) const {
+  return KValue(segmentPlane.read8(offset), offsetPlane.read8(offset));
+}
+
+KValue ObjectState::read(unsigned offset, Expr::Width width) const {
+  return KValue(segmentPlane.read(offset, width), offsetPlane.read(offset, width));
+}
+
+KValue ObjectState::read(ref<Expr> offset, Expr::Width width) const {
+  return KValue(segmentPlane.read(offset, width), offsetPlane.read(offset, width));
+}
+
+void ObjectState::write8(unsigned offset, uint8_t segment, uint8_t value) {
+  segmentPlane.write8(offset, segment);
+  offsetPlane.write8(offset, value);
+}
+
+void ObjectState::write16(unsigned offset, uint16_t segment, uint16_t value) {
+  segmentPlane.write16(offset, segment);
+  offsetPlane.write16(offset, value);
+}
+
+void ObjectState::write32(unsigned offset, uint32_t segment, uint32_t value) {
+  segmentPlane.write32(offset, segment);
+  offsetPlane.write32(offset, value);
+}
+
+void ObjectState::write64(unsigned offset, uint64_t segment, uint64_t value) {
+  segmentPlane.write64(offset, segment);
+  offsetPlane.write64(offset, value);
+}
+
+void ObjectState::write(unsigned offset, const KValue& value) {
+  segmentPlane.write(offset, value.getSegment());
+  offsetPlane.write(offset, value.getOffset());
+}
+
+void ObjectState::write(ref<Expr> offset, const KValue& value) {
+  segmentPlane.write(offset, value.getSegment());
+  offsetPlane.write(offset, value.getOffset());
+}
+
+void ObjectState::initializeToZero() {
+  segmentPlane.initializeToZero();
+  offsetPlane.initializeToZero();
+}
+
+void ObjectState::initializeToRandom() {
+  // TODO should be random as well?
+  segmentPlane.initializeToZero();
+  offsetPlane.initializeToRandom();
 }
