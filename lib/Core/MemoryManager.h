@@ -37,6 +37,8 @@ private:
   kdalloc::AllocatorFactory constantsFactory;
   kdalloc::Allocator constantsAllocator;
 
+  uint64_t lastSegment;
+
 public:
   explicit MemoryManager(ArrayCache *arrayCache);
   ~MemoryManager();

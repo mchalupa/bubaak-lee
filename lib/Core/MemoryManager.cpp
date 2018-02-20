@@ -130,7 +130,7 @@ llvm::cl::opt<bool> NullOnZeroMalloc(
 
 /***/
 MemoryManager::MemoryManager(ArrayCache *_arrayCache)
-    : arrayCache(_arrayCache) {
+    : arrayCache(_arrayCache), lastSegment(0) {
   if (DeterministicAllocation) {
     if (DeterministicAllocationQuarantineSize ==
         kdalloc::Allocator::unlimitedQuarantine) {
@@ -330,6 +330,7 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
   ++stats::allocations;
   MemoryObject *res = new MemoryObject(address, size, alignment, isLocal,
                                        isGlobal, false, allocSite, this);
+  res->segment = ++lastSegment;
   objects.insert(res);
   return res;
 }
