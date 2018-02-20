@@ -2790,7 +2790,8 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
 
   case Instruction::GetElementPtr: {
     KGEPInstruction *kgepi = static_cast<KGEPInstruction*>(ki);
-    ref<Expr> base = eval(ki, 0, state).value;
+    KValue pointer = eval(ki, 0, state);
+    ref<Expr> base = pointer.getOffset();
     ref<Expr> original_base = base;
 
     for (std::vector< std::pair<unsigned, uint64_t> >::iterator 
@@ -2814,7 +2815,8 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         ref<ConstantExpr> c_orig_base = dyn_cast<ConstantExpr>(original_base);
 
         ObjectPair op;
-        if (state.addressSpace.resolveOne(c_orig_base, op)) {
+        auto zeroSeg = ConstantExpr::create(0, c_orig_base->getWidth());
+        if (state.addressSpace.resolveConstantAddress(KValue(zeroSeg, c_orig_base), op)) {
           // store the address of the MemoryObject associated with this GEP
           // instruction
           state.base_mos[op.first->address].insert(base);
@@ -2845,7 +2847,8 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       }
     }
 
-    bindLocal(ki, state, base);
+    pointer.setOffset(base);
+    bindLocal(ki, state, pointer);
     break;
   }
 
