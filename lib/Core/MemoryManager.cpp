@@ -349,6 +349,7 @@ MemoryObject *MemoryManager::allocateFixed(uint64_t address, uint64_t size,
   ++stats::allocations;
   MemoryObject *res =
       new MemoryObject(address, size, 0, false, true, true, allocSite, this);
+  res->segment = ++lastSegment;
   objects.insert(res);
   return res;
 }
