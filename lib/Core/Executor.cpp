@@ -2793,43 +2793,35 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
 
   case Instruction::GetElementPtr: {
     KGEPInstruction *kgepi = static_cast<KGEPInstruction*>(ki);
-    KValue pointer = eval(ki, 0, state);
-    ref<Expr> base = pointer.getOffset();
-    ref<Expr> original_base = base;
+    KValue base = eval(ki, 0, state);
+    ref<Expr> original_base = base.getOffset();
+    Expr::Width pointerWidth = Context::get().getPointerWidth();
 
     for (std::vector< std::pair<unsigned, uint64_t> >::iterator 
            it = kgepi->indices.begin(), ie = kgepi->indices.end(); 
          it != ie; ++it) {
       uint64_t elementSize = it->second;
-      ref<Expr> index = eval(ki, it->first, state).value;
-      base = AddExpr::create(base,
-                             MulExpr::create(Expr::createSExtToPointerWidth(index),
-                                             Expr::createPointer(elementSize)));
+      KValue index = eval(ki, it->first, state);
+      base = base.Add(
+          index.SExt(pointerWidth)
+          .Mul(ConstantExpr::create(elementSize, pointerWidth)));
     }
     if (kgepi->offset)
-      base = AddExpr::create(base,
-                             Expr::createPointer(kgepi->offset));
+      base = base.Add(ConstantExpr::create(kgepi->offset, pointerWidth));
 
     if (SingleObjectResolution) {
-      if (isa<ConstantExpr>(original_base) && !isa<ConstantExpr>(base)) {
-        // the initial base address was a constant expression, the final is not:
-        // store the mapping between constant address and the non-const
-        // reference in the state
+      ref<Expr> base_offset = base.getOffset();
+      if (isa<ConstantExpr>(original_base) && !isa<ConstantExpr>(base_offset)) {
         ref<ConstantExpr> c_orig_base = dyn_cast<ConstantExpr>(original_base);
 
         ObjectPair op;
         auto zeroSeg = ConstantExpr::create(0, c_orig_base->getWidth());
         if (state.addressSpace.resolveConstantAddress(KValue(zeroSeg, c_orig_base), op)) {
-          // store the address of the MemoryObject associated with this GEP
-          // instruction
-          state.base_mos[op.first->address].insert(base);
+          state.base_mos[op.first->address].insert(base_offset);
           ref<ConstantExpr> r =
               ConstantExpr::alloc(op.first->address, Expr::Int64);
-          state.base_addrs[base] = r;
+          state.base_addrs[base_offset] = r;
         } else {
-          // this case should not happen - we have a GEP instruction with const
-          // base address, so we should be able to find an exact memory object
-          // match
           klee_warning("Failed to find a memory object for address %" PRIx64,
                        c_orig_base->getZExtValue());
         }
@@ -2837,21 +2829,19 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       } else if (!isa<ConstantExpr>(original_base)) {
         auto base_it = state.base_addrs.find(original_base);
         if (base_it != state.base_addrs.end()) {
-          // we need to update the current entry with a new value
           uint64_t address = base_it->second->getZExtValue();
           auto refs_it = state.base_mos[address].find(base_it->first);
           if (refs_it != state.base_mos[address].end()) {
             state.base_mos[address].erase(refs_it);
           }
-          state.base_mos[address].insert(base);
-          state.base_addrs[base] = base_it->second;
+          state.base_mos[address].insert(base_offset);
+          state.base_addrs[base_offset] = base_it->second;
           state.base_addrs.erase(base_it->first);
         }
       }
     }
 
-    pointer.setOffset(base);
-    bindLocal(ki, state, pointer);
+    bindLocal(ki, state, base);
     break;
   }
 
