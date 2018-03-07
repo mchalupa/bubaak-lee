@@ -276,26 +276,38 @@ bool ObjectStatePlane::isByteKnownSymbolic(size_t offset) const {
 }
 
 void ObjectStatePlane::markByteConcrete(size_t offset) {
-  if (offset >= concreteMask.size())
+  if (offset >= concreteMask.size()) {
+    if (!symbolic)
+      return;
     concreteMask.resize(size, !symbolic);
+  }
   concreteMask.set(offset);
 }
 
 void ObjectStatePlane::markByteSymbolic(size_t offset) {
-  if (offset >= concreteMask.size())
+  if (offset >= concreteMask.size()) {
+    if (symbolic)
+      return;
     concreteMask.resize(size, !symbolic);
+  }
   concreteMask.unset(offset);
 }
 
 void ObjectStatePlane::markByteUnflushed(size_t offset) const {
-  if (unflushedMask.size() <= offset)
+  if (offset >= unflushedMask.size()) {
+    if (!symbolic)
+      return;
     unflushedMask.resize(size, !symbolic);
+  }
   unflushedMask.set(offset);
 }
 
 void ObjectStatePlane::markByteFlushed(size_t offset) const {
-  if (unflushedMask.size() <= offset)
+  if (offset >= unflushedMask.size()) {
+    if (symbolic)
+      return;
     unflushedMask.resize(size, !symbolic);
+  }
   unflushedMask.unset(offset);
 }
 
