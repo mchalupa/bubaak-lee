@@ -13,6 +13,7 @@
 #include "Context.h"
 #include "TimingSolver.h"
 
+#include "klee/ADT/BitArray.h"
 #include "klee/Module/KValue.h"
 
 #include "llvm/ADT/StringExtras.h"
@@ -27,7 +28,6 @@ namespace llvm {
 namespace klee {
 
 class ArrayCache;
-class BitArray;
 class ExecutionState;
 class Executor;
 class MemoryManager;
@@ -226,24 +226,28 @@ private:
   ref<const ObjectState> parent;
 
   /// @brief Holds all known concrete bytes
-  uint8_t *concreteStore;
+  std::vector<uint8_t> concreteStore;
 
   /// @brief concreteMask[byte] is set if byte is known to be concrete
-  BitArray *concreteMask;
+  BitArray concreteMask;
 
   /// knownSymbolics[byte] holds the symbolic expression for byte,
   /// if byte is known to be symbolic
-  ref<Expr> *knownSymbolics;
+  std::vector<ref<Expr>> knownSymbolics;
 
   /// unflushedMask[byte] is set if byte is unflushed
   /// mutable because may need flushed during read of const
-  mutable BitArray *unflushedMask;
+  mutable BitArray unflushedMask;
 
   // mutable because we may need flush during read of const
   mutable UpdateList updates;
 
 public:
   size_t size;
+
+  bool symbolic;
+
+  uint8_t initialValue;
 
 public:
   /// Create a new object state for the given memory object with concrete
@@ -256,7 +260,7 @@ public:
   ObjectStatePlane(const ObjectState *parent, const Array *array);
 
   ObjectStatePlane(const ObjectState *parent, const ObjectStatePlane &os);
-  ~ObjectStatePlane();
+  ~ObjectStatePlane() = default;
 
   /// Make contents all concrete and zero
   void initializeToZero();
@@ -279,13 +283,6 @@ public:
   void write64(size_t offset, uint64_t value);
   void print() const;
 
-  /// Generate concrete values for each symbolic byte of the object and put them
-  /// in the concrete store.
-  ///
-  /// \param executor
-  /// \param state
-  /// \param concretize if true, constraints for concretised bytes are added if
-  /// necessary
   void flushToConcreteStore(Executor &executor, ExecutionState &state,
                             bool concretize);
 
@@ -299,13 +296,11 @@ private:
   ref<Expr> read8(Executor &executor, ExecutionState &state,
                   ref<Expr> offset) const;
   void write8(size_t offset, ref<Expr> value);
-  void write8(Executor &executor,ExecutionState &state,
+  void write8(Executor &executor, ExecutionState &state,
               ref<Expr> offset, ref<Expr> value);
 
-  void fastRangeCheckOffset(ref<Expr> offset, size_t *base_r,
-                            size_t *size_r) const;
-  void flushRangeForRead(size_t rangeBase, size_t rangeSize) const;
-  void flushRangeForWrite(size_t rangeBase, size_t rangeSize);
+  void flushForRead() const;
+  void flushForWrite();
 
   /// isByteConcrete ==> !isByteKnownSymbolic
   bool isByteConcrete(size_t offset) const;
@@ -318,9 +313,10 @@ private:
 
   void markByteConcrete(size_t offset);
   void markByteSymbolic(size_t offset);
-  void markByteFlushed(size_t offset);
-  void markByteUnflushed(size_t offset);
+  void markByteFlushed(size_t offset) const;
+  void markByteUnflushed(size_t offset) const;
   void setKnownSymbolic(size_t offset, Expr *value);
+  uint8_t getConcreteValue(size_t offset) const;
 };
 
 class ObjectState {

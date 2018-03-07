@@ -397,7 +397,8 @@ void AddressSpace::copyOutConcrete(const MemoryObject *mo,
                                    const ObjectState *os) const {
   auto address = reinterpret_cast<std::uint8_t *>(mo->address);
   // TODO segment
-  std::memcpy(address, os->offsetPlane->concreteStore, mo->size);
+  for (size_t i = 0; i < mo->size; i++)
+    address[i] = os->offsetPlane->getConcreteValue(i);
 }
 
 bool AddressSpace::copyInConcretes(bool concretize) {
@@ -420,9 +421,15 @@ bool AddressSpace::copyInConcrete(const MemoryObject *mo, const ObjectState *os,
   auto address = reinterpret_cast<std::uint8_t*>(src_address);
 
   // TODO segment
-  // Don't do anything if the underlying representation has not been changed
-  // externally.
-  if (std::memcmp(address, os->offsetPlane->concreteStore, mo->size) == 0)
+  // Don't do anything if the underlying representation has not been changed.
+  bool changed = false;
+  for (size_t i = 0; i < mo->size; i++) {
+    if (address[i] != os->offsetPlane->getConcreteValue(i)) {
+      changed = true;
+      break;
+    }
+  }
+  if (!changed)
     return true;
 
   // External object representation has been changed
@@ -432,24 +439,23 @@ bool AddressSpace::copyInConcrete(const MemoryObject *mo, const ObjectState *os,
     return false;
 
   ObjectState *wos = getWriteable(mo, os);
-  // Check if the object is fully concrete object. If so, use the fast
-  // path and `memcpy` the new values from the external object to the internal
-  // representation
-  if (!wos->offsetPlane->unflushedMask) {
-    std::memcpy(wos->offsetPlane->concreteStore, address, mo->size);
+  // Check if the object is fully concrete. If so, use the fast path.
+  if (wos->offsetPlane->unflushedMask.size() == 0) {
+    wos->offsetPlane->concreteStore.resize(mo->size, wos->offsetPlane->initialValue);
+    std::memcpy(wos->offsetPlane->concreteStore.data(), address, mo->size);
     return true;
   }
 
   // Check if object should be concretized
   if (concretize) {
     wos->offsetPlane->makeConcrete();
-    std::memcpy(wos->offsetPlane->concreteStore, address, mo->size);
+    wos->offsetPlane->concreteStore.resize(mo->size, wos->offsetPlane->initialValue);
+    std::memcpy(wos->offsetPlane->concreteStore.data(), address, mo->size);
   } else {
-    // The object is partially symbolic, it needs to be updated byte-by-byte
-    // via object state's `write` function
+    // The object is partially symbolic, update byte-by-byte
     for (size_t i = 0, ie = mo->size; i < ie; ++i) {
-      u_int8_t external_byte_value = *(address + i);
-      if (external_byte_value != wos->offsetPlane->concreteStore[i])
+      uint8_t external_byte_value = *(address + i);
+      if (external_byte_value != wos->offsetPlane->getConcreteValue(i))
         wos->offsetPlane->write8(i, external_byte_value);
     }
   }
