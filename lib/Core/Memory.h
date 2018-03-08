@@ -243,7 +243,7 @@ private:
   mutable UpdateList updates;
 
 public:
-  size_t size;
+  unsigned sizeBound;
 
   bool symbolic;
 
@@ -270,17 +270,17 @@ public:
 
   ref<Expr> read(Executor &executor, ExecutionState &state,
                  ref<Expr> offset, Expr::Width width) const;
-  ref<Expr> read(size_t offset, Expr::Width width) const;
-  ref<Expr> read8(size_t offset) const;
+  ref<Expr> read(unsigned offset, Expr::Width width) const;
+  ref<Expr> read8(unsigned offset) const;
 
-  void write(size_t offset, ref<Expr> value);
+  void write(unsigned offset, ref<Expr> value);
   void write(Executor &executor, ExecutionState &state,
              ref<Expr> offset, ref<Expr> value);
 
-  void write8(size_t offset, uint8_t value);
-  void write16(size_t offset, uint16_t value);
-  void write32(size_t offset, uint32_t value);
-  void write64(size_t offset, uint64_t value);
+  void write8(unsigned offset, uint8_t value);
+  void write16(unsigned offset, uint16_t value);
+  void write32(unsigned offset, uint32_t value);
+  void write64(unsigned offset, uint64_t value);
   void print() const;
 
   void flushToConcreteStore(Executor &executor, ExecutionState &state,
@@ -295,7 +295,7 @@ private:
 
   ref<Expr> read8(Executor &executor, ExecutionState &state,
                   ref<Expr> offset) const;
-  void write8(size_t offset, ref<Expr> value);
+  void write8(unsigned offset, ref<Expr> value);
   void write8(Executor &executor, ExecutionState &state,
               ref<Expr> offset, ref<Expr> value);
 
@@ -303,20 +303,20 @@ private:
   void flushForWrite();
 
   /// isByteConcrete ==> !isByteKnownSymbolic
-  bool isByteConcrete(size_t offset) const;
+  bool isByteConcrete(unsigned offset) const;
 
   /// isByteKnownSymbolic ==> !isByteConcrete
-  bool isByteKnownSymbolic(size_t offset) const;
+  bool isByteKnownSymbolic(unsigned offset) const;
 
   /// isByteUnflushed(i) => (isByteConcrete(i) || isByteKnownSymbolic(i))
-  bool isByteUnflushed(size_t offset) const;
+  bool isByteUnflushed(unsigned offset) const;
 
-  void markByteConcrete(size_t offset);
-  void markByteSymbolic(size_t offset);
-  void markByteFlushed(size_t offset) const;
-  void markByteUnflushed(size_t offset) const;
-  void setKnownSymbolic(size_t offset, Expr *value);
-  uint8_t getConcreteValue(size_t offset) const;
+  void markByteConcrete(unsigned offset);
+  void markByteSymbolic(unsigned offset);
+  void markByteFlushed(unsigned offset) const;
+  void markByteUnflushed(unsigned offset) const;
+  void setKnownSymbolic(unsigned offset, Expr *value);
+  uint8_t getConcreteValue(unsigned offset) const;
 };
 
 class ObjectState {
