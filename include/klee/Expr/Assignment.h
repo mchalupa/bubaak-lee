@@ -82,7 +82,7 @@ namespace klee {
     }
   }
 
-  inline ref<Expr> Assignment::evaluate(ref<Expr> e) const { 
+  inline ref<Expr> Assignment::evaluate(ref<Expr> e) const {
     AssignmentEvaluator v(*this);
     return v.visit(e); 
   }
