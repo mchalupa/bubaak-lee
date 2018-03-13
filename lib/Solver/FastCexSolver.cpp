@@ -991,7 +991,7 @@ public:
   bool computeValue(const Query&, ref<Expr> &result);
   bool computeInitialValues(const Query&,
                             const std::vector<const Array*> &objects,
-                            std::vector< std::vector<unsigned char> > &values,
+                            std::shared_ptr<const Assignment> &result,
                             bool &hasSolution);
 };
 
@@ -1112,8 +1112,8 @@ bool
 FastCexSolver::computeInitialValues(const Query& query,
                                     const std::vector<const Array*>
                                       &objects,
-                                    std::vector< std::vector<unsigned char> >
-                                      &values,
+                                    std::shared_ptr<const Assignment>
+                                      &result,
                                     bool &hasSolution) {
   CexData cd;
 
@@ -1130,6 +1130,8 @@ FastCexSolver::computeInitialValues(const Query& query,
 
   CexSizeVisitor sizeVisitor(cd);
   sizeVisitor.visitQuery(query);
+
+  std::vector< std::vector<unsigned char> > values;
 
   // Propogation found a satisfying assignment, compute the initial values.
   for (unsigned i = 0; i != objects.size(); ++i) {
@@ -1155,6 +1157,8 @@ FastCexSolver::computeInitialValues(const Query& query,
 
     values.push_back(data);
   }
+
+  result = std::make_shared<Assignment>(objects, values);
 
   return true;
 }

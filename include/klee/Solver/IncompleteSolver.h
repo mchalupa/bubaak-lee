@@ -78,7 +78,7 @@ public:
   /// is not found, then the values array must be unmodified.
   virtual bool
   computeInitialValues(const Query &, const std::vector<const Array *> &objects,
-                       std::vector<std::vector<unsigned char>> &values,
+                       std::shared_ptr<const Assignment> &result,
                        bool &hasSolution) = 0;
 };
 
@@ -99,7 +99,7 @@ public:
   bool computeValue(const Query &, ref<Expr> &result) override;
   bool computeInitialValues(const Query &,
                             const std::vector<const Array *> &objects,
-                            std::vector<std::vector<unsigned char>> &values,
+                            std::shared_ptr<const Assignment> &result,
                             bool &hasSolution) override;
   SolverRunStatus getOperationStatusCode() override;
   std::string getConstraintLog(const Query &) override;

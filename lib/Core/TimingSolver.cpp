@@ -138,13 +138,13 @@ bool TimingSolver::getValue(const ConstraintSet& constraints, KValue value,
 
   Query query(constraints, ConstantExpr::alloc(0, Expr::Bool));
   std::vector<const Array *> objects;
-  std::vector< std::vector<unsigned char> > values;
-  findSymbolicObjects(query.expr, objects);
-  bool success = solver->getInitialValues(query, objects, values);
+  std::shared_ptr<const Assignment> assignment;
+  findSymbolicObjects(segment, objects);
+  findSymbolicObjects(offset, objects);
+  bool success = solver->getInitialValues(query, objects, assignment);
   if (success) {
-    Assignment a(objects, values);
-    segmentResult = cast<ConstantExpr>(a.evaluate(segment));
-    offsetResult = cast<ConstantExpr>(a.evaluate(offset));
+    segmentResult = cast<ConstantExpr>(assignment->evaluate(segment));
+    offsetResult = cast<ConstantExpr>(assignment->evaluate(offset));
   }
 
   metaData.queryCost += timer.delta() / 1e6;
@@ -154,7 +154,7 @@ bool TimingSolver::getValue(const ConstraintSet& constraints, KValue value,
 
 bool TimingSolver::getInitialValues(
     const ConstraintSet &constraints, const std::vector<const Array *> &objects,
-    std::vector<std::vector<unsigned char>> &result,
+    std::shared_ptr<const Assignment> &result,
     SolverQueryMetaData &metaData) {
   ++stats::queries;
   if (objects.empty())
@@ -166,7 +166,6 @@ bool TimingSolver::getInitialValues(
       Query(constraints, ConstantExpr::alloc(0, Expr::Bool)), objects, result);
 
   metaData.queryCost += timer.delta();
-
   return success;
 }
 
