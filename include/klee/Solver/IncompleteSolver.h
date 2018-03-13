@@ -77,7 +77,7 @@ public:
   /// for the initial state of each given object. If a correct result
   /// is not found, then the values array must be unmodified.
   virtual bool
-  computeInitialValues(const Query &, const std::vector<const Array *> &objects,
+  computeInitialValues(const Query &,
                        std::shared_ptr<const Assignment> &result,
                        bool &hasSolution) = 0;
 };
@@ -98,7 +98,6 @@ public:
   bool computeValidity(const Query &, Solver::Validity &result) override;
   bool computeValue(const Query &, ref<Expr> &result) override;
   bool computeInitialValues(const Query &,
-                            const std::vector<const Array *> &objects,
                             std::shared_ptr<const Assignment> &result,
                             bool &hasSolution) override;
   SolverRunStatus getOperationStatusCode() override;

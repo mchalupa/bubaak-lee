@@ -77,12 +77,10 @@ public:
     return solver->impl->computeValue(query, result);
   }
   bool computeInitialValues(const Query &query,
-                            const std::vector<const Array *> &objects,
                             std::shared_ptr<const Assignment> &result,
                             bool &hasSolution) override {
     ++stats::queryCacheMisses;
-    return solver->impl->computeInitialValues(query, objects, result,
-                                              hasSolution);
+    return solver->impl->computeInitialValues(query, result, hasSolution);
   }
   SolverRunStatus getOperationStatusCode() override;
   std::string getConstraintLog(const Query &) override;

@@ -31,7 +31,6 @@ public:
   bool computeTruth(const Query &, bool &isValid) override;
   bool computeValue(const Query &, ref<Expr> &result) override;
   bool computeInitialValues(const Query &,
-                            const std::vector<const Array *> &objects,
                             std::shared_ptr<const Assignment> &result,
                             bool &hasSolution) override;
   SolverRunStatus getOperationStatusCode() override;
@@ -54,10 +53,10 @@ bool AssignmentValidatingSolver::computeValue(const Query &query,
 }
 
 bool AssignmentValidatingSolver::computeInitialValues(
-    const Query &query, const std::vector<const Array *> &objects,
+    const Query &query,
     std::shared_ptr<const Assignment> &result, bool &hasSolution) {
   bool success =
-      solver->impl->computeInitialValues(query, objects, result, hasSolution);
+      solver->impl->computeInitialValues(query, result, hasSolution);
   if (!hasSolution)
     return success;
 
