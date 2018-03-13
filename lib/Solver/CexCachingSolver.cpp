@@ -55,16 +55,8 @@ cl::opt<bool>
 
 typedef std::set< ref<Expr> > KeyType;
 
-struct AssignmentLessThan {
-  bool operator()(std::shared_ptr<const Assignment> a,
-                  std::shared_ptr<const Assignment> b) {
-    return a->bindings < b->bindings;
-  }
-};
-
-
 class CexCachingSolver : public SolverImpl {
-  typedef std::set<std::shared_ptr<const Assignment>, AssignmentLessThan>
+  typedef std::set<std::shared_ptr<const Assignment> >
           assignmentsTable_ty;
 
   std::unique_ptr<Solver> solver;
