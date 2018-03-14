@@ -335,8 +335,6 @@ private:
 
 
 public:
-  unsigned size;
-
   bool readOnly;
 
 private:
