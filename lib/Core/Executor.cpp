@@ -4189,22 +4189,18 @@ void Executor::executeAlloc(ExecutionState &state,
       bindLocal(target, state, 
                 KValue(ConstantExpr::alloc(0, Context::get().getPointerWidth())));
     } else {
-      ObjectState *os = bindObjectInState(state, mo, isLocal);
-      if (zeroMemory) {
-        os->initializeToZero();
-      } else {
-        os->initializeToRandom();
-      }
       bindLocal(target, state, mo->getPointer());
-      
-      if (reallocFrom) {
-        unsigned count = std::min(reallocFrom->size, os->size);
-        for (unsigned i=0; i<count; i++)
-          // TODO segment
-          os->write(i, reallocFrom->read8(i));
-        const MemoryObject *reallocObject = reallocFrom->getObject();
-        state.deallocate(reallocObject);
-        state.addressSpace.unbindObject(reallocObject);
+      if (!reallocFrom) {
+        ObjectState *os = bindObjectInState(state, mo, isLocal);
+        if (zeroMemory) {
+          os->initializeToZero();
+        } else {
+          os->initializeToRandom();
+        }
+      } else {
+        ObjectState *os = new ObjectState(*reallocFrom, mo);
+        state.addressSpace.unbindObject(reallocFrom->getObject());
+        state.addressSpace.bindObject(mo, os);
       }
     }
   } else {
