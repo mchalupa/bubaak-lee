@@ -328,7 +328,8 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
     return 0;
 
   ++stats::allocations;
-  MemoryObject *res = new MemoryObject(address, size, alignment, isLocal,
+  ref<Expr> symSize = ConstantExpr::alloc(size, Context::get().getPointerWidth());
+  MemoryObject *res = new MemoryObject(address, symSize, alignment, isLocal,
                                        isGlobal, false, allocSite, this);
   res->segment = ++lastSegment;
   objects.insert(res);
@@ -341,15 +342,19 @@ MemoryObject *MemoryManager::allocateFixed(uint64_t address, uint64_t size,
   for (objects_ty::iterator it = objects.begin(), ie = objects.end(); it != ie;
        ++it) {
     MemoryObject *mo = *it;
-    if (address + size > mo->address && address < mo->address + mo->size)
-      klee_error("Trying to allocate an overlapping object");
+    // symbolic size objects can overlap
+    if (ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
+      unsigned moSize = CE->getZExtValue();
+      if (address + moSize > mo->address && address < mo->address + moSize)
+        klee_error("Trying to allocate an overlapping object");
+    }
   }
 #endif
 
   ++stats::allocations;
+  ref<Expr> sizeExpr = ConstantExpr::alloc(size, Context::get().getPointerWidth());
   MemoryObject *res =
-      new MemoryObject(address, size, 0, false, true, true, allocSite, this);
-  res->segment = ++lastSegment;
+      new MemoryObject(++lastSegment, address, sizeExpr, false, true, true, allocSite, this);
   objects.insert(res);
   return res;
 }

@@ -844,7 +844,7 @@ void Executor::initializeGlobalObjects(ExecutionState &state) {
     MemoryObject *mo = globalObjects.find(&v)->second;
     ObjectState *os = bindObjectInState(state, mo, false);
 
-    if (v.isDeclaration() && mo->size) {
+    if (v.isDeclaration() && cast<ConstantExpr>(mo->size)->getZExtValue()) {
       // Program already running -> object already initialized.
       // Read concrete value and write it to our copy.
       void *addr;
@@ -857,7 +857,7 @@ void Executor::initializeGlobalObjects(ExecutionState &state) {
         klee_error("Unable to load symbol(%.*s) while initializing globals",
                    static_cast<int>(v.getName().size()), v.getName().data());
       }
-      for (unsigned offset = 0; offset < mo->size; offset++) {
+      for (unsigned offset = 0; offset < cast<ConstantExpr>(mo->size)->getZExtValue(); offset++) {
         os->write8(offset, 0, static_cast<unsigned char *>(addr)[offset]);
       }
     } else if (v.hasInitializer()) {
@@ -2054,7 +2054,7 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
             state.addressSpace.resolveConstantAddress(arguments[k], op);
             const ObjectState *osarg = op.second;
             assert(osarg);
-            for (unsigned i = 0; i < osarg->getObject()->size; i++)
+            for (unsigned i = 0; i < cast<ConstantExpr>(osarg->getObject()->size)->getZExtValue(); i++)
               os->write(offsets[k] + i, osarg->read8(i));
           }
         }
@@ -4450,7 +4450,9 @@ void Executor::executeMemoryOperation(ExecutionState &state,
     if (success) {
       const MemoryObject *mo = op.first;
 
-      if (MaxSymArraySize && mo->size >= MaxSymArraySize) {
+      if (MaxSymArraySize &&
+          (!isa<ConstantExpr>(mo->size) ||
+           cast<ConstantExpr>(mo->size)->getZExtValue() >= MaxSymArraySize)) {
         address = KValue(toConstant(state, address.getSegment(), "max-sym-array-size"),
                          toConstant(state, address.getOffset(), "max-sym-array-size"));
       }
@@ -4593,11 +4595,17 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
                                    const std::string &name) {
   // Create a new object state for the memory object (instead of a copy).
   if (!replayKTest) {
+    // TODO fix seeding for symbolic sizes
+    unsigned size = 0;
+    if (ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
+      size = CE->getZExtValue();
+    }
+
     // Check if the size is greater than UINT32_MAX
-    if (mo->size > UINT32_MAX) {
+    if (size > UINT32_MAX) {
       terminateStateOnExecError(
           state, "Symbolic objects larger than 4 GiB are not allowed "
-                 "(requested " + llvm::utostr(mo->size) + " bytes).");
+                 "(requested " + llvm::utostr(size) + " bytes).");
       return;
     }
 
@@ -4608,7 +4616,7 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
     while (!state.arrayNames.insert(uniqueName).second) {
       uniqueName = name + "_" + llvm::utostr(++id);
     }
-    const Array *array = arrayCache.CreateArray(uniqueName, mo->size);
+    const Array *array = arrayCache.CreateArray(uniqueName, size);
     bindObjectInState(state, mo, false, array);
     state.addSymbolic(mo, array);
     
@@ -4622,19 +4630,19 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
         if (!obj) {
           if (AllowSeedExtension) {
             std::vector<unsigned char> &values = si.assignment.bindings[array];
-            values = std::vector<unsigned char>(mo->size, '\0');
-          } else /*if (!AllowSeedExtension)*/ {
-            terminateStateOnUserError(state,
-                                      "ran out of inputs during seeding");
+            values = std::vector<unsigned char>(size, '\0');
+          } else if (!AllowSeedExtension) {
+            terminateStateOnUserError(state, "ran out of inputs during seeding");
             break;
           }
         } else {
-          /* The condition below implies obj->numBytes != mo->size */
-          if ((obj->numBytes < mo->size && !AllowSeedExtension) ||
-              (obj->numBytes > mo->size && !AllowSeedTruncation)) {
+          if (obj->numBytes != size &&
+              ((!(AllowSeedExtension || ZeroSeedExtension)
+                && obj->numBytes < size) ||
+               (!AllowSeedTruncation && obj->numBytes > size))) {
             std::stringstream msg;
 	    msg << "replace size mismatch: "
-		<< mo->name << "[" << mo->size << "]"
+		<< mo->name << "[" << size << "]"
 		<< " vs " << obj->name << "[" << obj->numBytes << "]"
 		<< " in test\n";
             terminateStateOnUserError(state, msg.str());
@@ -4643,8 +4651,9 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
             /* Either sizes are equal or seed extension/trucation is allowed */
             std::vector<unsigned char> &values = si.assignment.bindings[array];
             values.insert(values.begin(), obj->bytes,
-                          obj->bytes + std::min((size_t) obj->numBytes, mo->size));
-              for (unsigned i = obj->numBytes; i < mo->size; ++i)
+                          obj->bytes + std::min(obj->numBytes, size));
+            if (ZeroSeedExtension) {
+              for (unsigned i=obj->numBytes; i<size; ++i)
                 values.push_back('\0');
           }
         }
@@ -4656,12 +4665,17 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
       terminateStateOnUserError(state, "replay count mismatch");
     } else {
       KTestObject *obj = &replayKTest->objects[replayPosition++];
-      if (obj->numBytes != mo->size) {
-        terminateStateOnUserError(state, "replay size mismatch");
+      if (ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
+        unsigned size = CE->getZExtValue();
+        if (obj->numBytes != size) {
+          terminateStateOnUserError(state, "replay size mismatch");
+        } else {
+          for (unsigned i=0; i<size; i++)
+            // TODO segment
+            os->write8(i, 0, obj->bytes[i]);
+        }
       } else {
-        for (unsigned i=0; i<mo->size; i++)
-          // TODO segment
-          os->write8(i, 0, obj->bytes[i]);
+        terminateStateOnUserError(state, "symbolic size object in replay");
       }
     }
   }

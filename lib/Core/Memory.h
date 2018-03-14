@@ -51,7 +51,7 @@ public:
   uint64_t address;
 
   /// size in bytes
-  size_t size;
+  ref<Expr> size;
   size_t alignment;
   mutable std::string name;
 
@@ -86,7 +86,7 @@ public:
       allocSite(0) {
   }
 
-  MemoryObject(uintptr_t _address, size_t _size, size_t _alignment,
+  MemoryObject(uint64_t _address, ref<Expr> _size, size_t _alignment,
                bool _isLocal, bool _isGlobal, bool _isFixed,
                const llvm::Value *_allocSite,
                MemoryManager *_parent)
@@ -104,7 +104,7 @@ public:
       allocSite(_allocSite) {
   }
 
-    MemoryObject(uint64_t segment, uint64_t _address, unsigned _size,
+    MemoryObject(uint64_t segment, uint64_t _address, ref<Expr> _size,
                  bool _isLocal, bool _isGlobal, bool _isFixed,
                  const llvm::Value *_allocSite,
                  MemoryManager *_parent)
@@ -152,10 +152,14 @@ public:
     return std::to_string(address);
   }
   std::string getSizeString() const {
-    return std::to_string(size);
+    if (ConstantExpr *CE = dyn_cast<ConstantExpr>(size)) {
+      return std::to_string(CE->getZExtValue());
+    } else {
+      return "symbolic";
+    }
   }
   ref<Expr> getSizeExpr() const {
-    return ConstantExpr::create(size, Context::get().getPointerWidth());
+    return size;
   }
   ref<Expr> getOffsetExpr(ref<Expr> pointer) const {
     return SubExpr::create(pointer, getBaseExpr());
@@ -178,21 +182,18 @@ private:
             EqExpr::create(getSegmentExpr(), segment));
   }
   ref<Expr> getBoundsCheckOffset(ref<Expr> offset) const {
-    if (size==0) {
+    if (isa<ConstantExpr>(size) && cast<ConstantExpr>(size)->isZero()) {
       return EqExpr::create(offset, 
                             ConstantExpr::alloc(0, Context::get().getPointerWidth()));
     } else {
       return UltExpr::create(offset, getSizeExpr());
     }
   }
-  ref<Expr> getBoundsCheckOffset(ref<Expr> offset, size_t bytes) const {
-    if (bytes<=size) {
-      return UltExpr::create(offset, 
-                             ConstantExpr::alloc(size - bytes + 1, 
-                                                 Context::get().getPointerWidth()));
-    } else {
-      return ConstantExpr::alloc(0, Expr::Bool);
-    }
+  ref<Expr> getBoundsCheckOffset(ref<Expr> offset, unsigned bytes) const {
+    return UltExpr::create(offset,
+                           SubExpr::create(size,
+                                           ConstantExpr::alloc(bytes - 1,
+                                                               size->getWidth())));
   }
 
   /// Compare this object with memory object b.
