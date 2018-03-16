@@ -271,14 +271,29 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
                                       bool isGlobal, ExecutionState *state,
                                       const llvm::Value *allocSite,
                                       size_t alignment) {
-  if (size > 10 * 1024 * 1024)
+  ref<Expr> sizeExpr = ConstantExpr::alloc(size, Context::get().getPointerWidth());
+  return allocate(sizeExpr, isLocal, isGlobal, state, allocSite, alignment);
+}
+
+MemoryObject *MemoryManager::allocate(ref<Expr> size, bool isLocal,
+                                      bool isGlobal, ExecutionState *state,
+                                      const llvm::Value *allocSite,
+                                      size_t alignment) {
+  uint64_t concreteSize = 0;
+  bool hasConcreteSize = false;
+  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(size)) {
+    hasConcreteSize = true;
+    concreteSize = CE->getZExtValue();
+  }
+
+  if (concreteSize > 10 * 1024 * 1024)
     klee_warning_once(nullptr,
                       "Large memory allocation (%" PRIu64 " bytes). "
                       "KLEE may run out of memory.",
-                      size);
+                      concreteSize);
 
   // Return NULL if size is zero, this is equal to error during allocation
-  if (NullOnZeroMalloc && size == 0)
+  if (NullOnZeroMalloc && hasConcreteSize && concreteSize == 0)
     return 0;
 
   if (!llvm::isPowerOf2_64(alignment)) {
@@ -290,33 +305,33 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
   if (DeterministicAllocation) {
     void *allocAddress;
 
+    size_t kdalloc_size = std::max(hasConcreteSize ? concreteSize : (uint64_t)1,
+                                   (uint64_t)alignment);
     if (isGlobal) {
       const llvm::GlobalVariable *gv =
           dyn_cast<llvm::GlobalVariable>(allocSite);
       if (isa<llvm::Function>(allocSite) || (gv && gv->isConstant())) {
-        allocAddress = constantsAllocator.allocate(
-            std::max(size, static_cast<std::uint64_t>(alignment)));
+        allocAddress = constantsAllocator.allocate(kdalloc_size);
       } else {
-        allocAddress = globalsAllocator.allocate(
-            std::max(size, static_cast<std::uint64_t>(alignment)));
+        allocAddress = globalsAllocator.allocate(kdalloc_size);
       }
     } else {
       if (isLocal) {
-        allocAddress = state->stackAllocator.allocate(
-            std::max(size, static_cast<std::uint64_t>(alignment)));
+        allocAddress = state->stackAllocator.allocate(kdalloc_size);
       } else {
-        allocAddress = state->heapAllocator.allocate(
-            std::max(size, static_cast<std::uint64_t>(alignment)));
+        allocAddress = state->heapAllocator.allocate(kdalloc_size);
       }
     }
 
     address = reinterpret_cast<std::uint64_t>(allocAddress);
   } else {
+    // allocate 1 byte for symbolic-size allocation, just so we get an address
+    size_t alloc_size = hasConcreteSize ? concreteSize : 1;
     // Use malloc for the standard case
     if (alignment <= 8)
-      address = (uint64_t)malloc(size);
+      address = (uint64_t)malloc(alloc_size);
     else {
-      int res = posix_memalign((void **)&address, alignment, size);
+      int res = posix_memalign((void **)&address, alignment, alloc_size);
       if (res < 0) {
         klee_warning("Allocating aligned memory failed.");
         address = 0;
@@ -328,8 +343,7 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
     return 0;
 
   ++stats::allocations;
-  ref<Expr> symSize = ConstantExpr::alloc(size, Context::get().getPointerWidth());
-  MemoryObject *res = new MemoryObject(address, symSize, alignment, isLocal,
+  MemoryObject *res = new MemoryObject(address, size, alignment, isLocal,
                                        isGlobal, false, allocSite, this);
   res->segment = ++lastSegment;
   objects.insert(res);
