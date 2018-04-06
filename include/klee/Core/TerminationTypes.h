@@ -48,19 +48,20 @@ enum class StateTerminationClass : std::uint8_t {
   TTYPE(Assert, 31U, "assert.err")                                             \
   TTYPE(BadVectorAccess, 32U, "bad_vector_access.err")                         \
   TTYPE(Free, 33U, "free.err")                                                 \
-  TTYPE(Model, 34U, "model.err")                                               \
-  TTYPE(Overflow, 35U, "overflow.err")                                         \
-  TTYPE(Ptr, 36U, "ptr.err")                                                   \
-  TTYPE(ReadOnly, 37U, "read_only.err")                                        \
-  TTYPE(ReportError, 38U, "report_error.err")                                  \
-  TTYPE(InvalidBuiltin, 39U, "invalid_builtin_use.err")                        \
-  TTYPE(ImplicitTruncation, 40U, "implicit_truncation.err")                    \
-  TTYPE(ImplicitConversion, 41U, "implicit_conversion.err")                    \
-  TTYPE(UnreachableCall, 42U, "unreachable_call.err")                          \
-  TTYPE(MissingReturn, 43U, "missing_return.err")                              \
-  TTYPE(InvalidLoad, 44U, "invalid_load.err")                                  \
-  TTYPE(NullableAttribute, 45U, "nullable_attribute.err")                      \
-  TTMARK(PROGERR, 45U)                                                         \
+  TTYPE(Leak, 34U, "leak.err")                                                 \
+  TTYPE(Model, 35U, "model.err")                                               \
+  TTYPE(Overflow, 36U, "overflow.err")                                         \
+  TTYPE(Ptr, 37U, "ptr.err")                                                   \
+  TTYPE(ReadOnly, 38U, "read_only.err")                                        \
+  TTYPE(ReportError, 39U, "report_error.err")                                  \
+  TTYPE(InvalidBuiltin, 40U, "invalid_builtin_use.err")                        \
+  TTYPE(ImplicitTruncation, 41U, "implicit_truncation.err")                    \
+  TTYPE(ImplicitConversion, 42U, "implicit_conversion.err")                    \
+  TTYPE(UnreachableCall, 43U, "unreachable_call.err")                          \
+  TTYPE(MissingReturn, 44U, "missing_return.err")                              \
+  TTYPE(InvalidLoad, 45U, "invalid_load.err")                                  \
+  TTYPE(NullableAttribute, 46U, "nullable_attribute.err")                      \
+  TTMARK(PROGERR, 46U)                                                         \
   TTYPE(User, 50U, "user.err")                                                 \
   TTMARK(USERERR, 50U)                                                         \
   TTYPE(Execution, 60U, "exec.err")                                            \
@@ -72,7 +73,6 @@ enum class StateTerminationClass : std::uint8_t {
   TTYPE(SilentExit, 80U, "")                                                   \
   TTMARK(EARLYUSER, 80U)                                                       \
   TTMARK(END, 80U)
-
 
 ///@brief Reason an ExecutionState got terminated.
 enum class StateTerminationType : std::uint8_t {

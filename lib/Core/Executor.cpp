@@ -156,6 +156,11 @@ cl::opt<bool> EmitAllErrors(
              "(default=false, i.e. one per (error,instruction) pair)"),
     cl::cat(TestGenCat));
 
+cl::opt<bool> CheckLeaks(
+    "check-leaks", cl::init(false),
+    cl::desc("Check for memory leaks"),
+    cl::cat(TestGenCat));
+
 
 /* Constraint solving options */
 
@@ -308,6 +313,8 @@ cl::list<StateTerminationType> ExitOnErrorType(
                    "External objects referenced"),
         clEnumValN(StateTerminationType::Free, "Free",
                    "Freeing invalid memory"),
+        clEnumValN(StateTerminationType::Leak, "Leak",
+                   "Leaking heap-allocated memory"),
         clEnumValN(StateTerminationType::Model, "Model",
                    "Memory model limit hit"),
         clEnumValN(StateTerminationType::Overflow, "Overflow",
@@ -3762,16 +3769,30 @@ static std::string terminationTypeFileExtension(StateTerminationType type) {
   return ret;
 };
 
+static bool hasMemoryLeaks(ExecutionState &state) {
+  for (auto& object : state.addressSpace.objects) {
+    if (!object.first->isLocal && !object.first->isGlobal
+        && !object.first->isFixed) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void Executor::terminateStateOnExit(ExecutionState &state) {
   ++stats::terminationExit;
-  if (ExitOnErrorType.empty() &&
-      (shouldWriteTest(state) || (AlwaysOutputSeeds && seedMap.count(&state))))
-    interpreterHandler->processTestCase(
-        state, nullptr,
-        terminationTypeFileExtension(StateTerminationType::Exit).c_str());
-
-  interpreterHandler->incPathsCompleted();
-  terminateState(state, StateTerminationType::Exit);
+  if (CheckLeaks && hasMemoryLeaks(state)) {
+    terminateStateOnProgramError(state, "memory error: memory leak detected",
+                                 StateTerminationType::Leak);
+  } else {
+    if (ExitOnErrorType.empty() &&
+        (shouldWriteTest(state) || (AlwaysOutputSeeds && seedMap.count(&state))))
+      interpreterHandler->processTestCase(
+          state, nullptr,
+          terminationTypeFileExtension(StateTerminationType::Exit).c_str());
+    interpreterHandler->incPathsCompleted();
+    terminateState(state, StateTerminationType::Exit);
+  }
 }
 
 void Executor::terminateStateEarly(ExecutionState &state, const Twine &message,
@@ -4008,7 +4029,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
       if (!isa<ConstantExpr>(segmentExpr)) {
         terminateStateOnExecError(state,
                                   "external call with symbolic segment argument: " +
-                                  function->getName());
+                                  callable->getName());
         return;
       }
 
