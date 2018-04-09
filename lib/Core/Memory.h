@@ -174,16 +174,9 @@ public:
             getBoundsCheckSegment(pointer.getSegment()),
             getBoundsCheckOffset(getOffsetExpr(pointer.getOffset()), bytes));
   }
-
-private:
-  ref<Expr> getBoundsCheckSegment(ref<Expr> segment) const {
-    return OrExpr::create(
-            EqExpr::create(segment, ConstantExpr::alloc(0, segment->getWidth())),
-            EqExpr::create(getSegmentExpr(), segment));
-  }
   ref<Expr> getBoundsCheckOffset(ref<Expr> offset) const {
     if (isa<ConstantExpr>(size) && cast<ConstantExpr>(size)->isZero()) {
-      return EqExpr::create(offset, 
+      return EqExpr::create(offset,
                             ConstantExpr::alloc(0, Context::get().getPointerWidth()));
     } else {
       return UltExpr::create(offset, getSizeExpr());
@@ -213,6 +206,13 @@ private:
       return (allocSite < b.allocSite ? -1 : 1);
 
     return 0;
+  }
+
+private:
+  ref<Expr> getBoundsCheckSegment(ref<Expr> segment) const {
+    return OrExpr::create(
+            EqExpr::create(segment, ConstantExpr::alloc(0, segment->getWidth())),
+            EqExpr::create(getSegmentExpr(), segment));
   }
 };
 
