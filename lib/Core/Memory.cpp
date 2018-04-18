@@ -81,7 +81,7 @@ ObjectStatePlane::ObjectStatePlane(const ObjectState *parent)
   : parent(parent),
     updates(nullptr, nullptr),
     sizeBound(0),
-    symbolic(false),
+    initialized(false),
     initialValue(0) {
   if (!UseConstantArrays) {
     static unsigned id = 0;
@@ -91,6 +91,7 @@ ObjectStatePlane::ObjectStatePlane(const ObjectState *parent)
   }
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(parent->getObject()->size)) {
     sizeBound = CE->getZExtValue();
+    initialized = true;
   }
 }
 
@@ -99,7 +100,7 @@ ObjectStatePlane::ObjectStatePlane(const ObjectState *parent, const Array *array
   : parent(parent),
     updates(array, nullptr),
     sizeBound(0),
-    symbolic(true),
+    initialized(false),
     initialValue(0) {
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(parent->getObject()->size)) {
     sizeBound = CE->getZExtValue();
@@ -114,7 +115,7 @@ ObjectStatePlane::ObjectStatePlane(const ObjectState *parent, const ObjectStateP
     unflushedMask(os.unflushedMask),
     updates(os.updates),
     sizeBound(os.sizeBound),
-    symbolic(os.symbolic),
+    initialized(os.initialized),
     initialValue(os.initialValue) {
   assert(!os.parent->readOnly && "no need to copy read only object?");
 }
@@ -269,20 +270,18 @@ void ObjectStatePlane::flushForWrite() {
       setKnownSymbolic(offset, 0);
     }
   }
-  // everything is potentially overwritten
-  symbolic = true;
 }
 
 bool ObjectStatePlane::isByteConcrete(size_t offset) const {
   if (offset < concreteMask.size())
     return concreteMask.get(offset);
-  return !symbolic;
+  return initialized;
 }
 
 bool ObjectStatePlane::isByteUnflushed(size_t offset) const {
   if (offset < unflushedMask.size())
     return unflushedMask.get(offset);
-  return !symbolic;
+  return initialized;
 }
 
 bool ObjectStatePlane::isByteKnownSymbolic(size_t offset) const {
@@ -291,36 +290,36 @@ bool ObjectStatePlane::isByteKnownSymbolic(size_t offset) const {
 
 void ObjectStatePlane::markByteConcrete(size_t offset) {
   if (offset >= concreteMask.size()) {
-    if (!symbolic)
+    if (initialized)
       return;
-    concreteMask.resize(sizeBound, !symbolic);
+    concreteMask.resize(sizeBound, initialized);
   }
   concreteMask.set(offset);
 }
 
 void ObjectStatePlane::markByteSymbolic(size_t offset) {
   if (offset >= concreteMask.size()) {
-    if (symbolic)
+    if (!initialized)
       return;
-    concreteMask.resize(sizeBound, !symbolic);
+    concreteMask.resize(sizeBound, initialized);
   }
   concreteMask.unset(offset);
 }
 
 void ObjectStatePlane::markByteUnflushed(size_t offset) const {
   if (offset >= unflushedMask.size()) {
-    if (!symbolic)
+    if (initialized)
       return;
-    unflushedMask.resize(sizeBound, !symbolic);
+    unflushedMask.resize(sizeBound, initialized);
   }
   unflushedMask.set(offset);
 }
 
 void ObjectStatePlane::markByteFlushed(size_t offset) const {
   if (offset >= unflushedMask.size()) {
-    if (symbolic)
+    if (!initialized)
       return;
-    unflushedMask.resize(sizeBound, !symbolic);
+    unflushedMask.resize(sizeBound, initialized);
   }
   unflushedMask.unset(offset);
 }
