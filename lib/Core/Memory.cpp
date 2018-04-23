@@ -81,7 +81,8 @@ ObjectStatePlane::ObjectStatePlane(const ObjectState *parent)
   : parent(parent),
     updates(nullptr, nullptr),
     sizeBound(0),
-    initialized(false),
+    initialized(true),
+    symbolic(false),
     initialValue(0) {
   if (!UseConstantArrays) {
     static unsigned id = 0;
@@ -91,7 +92,6 @@ ObjectStatePlane::ObjectStatePlane(const ObjectState *parent)
   }
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(parent->getObject()->size)) {
     sizeBound = CE->getZExtValue();
-    initialized = true;
   }
 }
 
@@ -101,6 +101,7 @@ ObjectStatePlane::ObjectStatePlane(const ObjectState *parent, const Array *array
     updates(array, nullptr),
     sizeBound(0),
     initialized(false),
+    symbolic(true),
     initialValue(0) {
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(parent->getObject()->size)) {
     sizeBound = CE->getZExtValue();
@@ -116,6 +117,7 @@ ObjectStatePlane::ObjectStatePlane(const ObjectState *parent, const ObjectStateP
     updates(os.updates),
     sizeBound(os.sizeBound),
     initialized(os.initialized),
+    symbolic(os.symbolic),
     initialValue(os.initialValue) {
   assert(!os.parent->readOnly && "no need to copy read only object?");
 }
@@ -270,6 +272,7 @@ void ObjectStatePlane::flushForWrite() {
       setKnownSymbolic(offset, 0);
     }
   }
+  initialized = false;
 }
 
 bool ObjectStatePlane::isByteConcrete(size_t offset) const {
@@ -350,14 +353,11 @@ ref<Expr> ObjectStatePlane::read8(unsigned offset) const {
   } else {
     assert(!isByteUnflushed(offset) && "unflushed byte without cache value");
     
-    return ReadExpr::create(getUpdates(), 
-                            ConstantExpr::create(offset, Expr::Int32));
+    return read8(ConstantExpr::create(offset, Expr::Int32));
   }    
 }
 
-ref<Expr> ObjectStatePlane::read8(Executor &executor, ExecutionState &state, ref<Expr> offset) const {
-  assert(!isa<ConstantExpr>(offset) &&
-         "constant offset passed to symbolic read8");
+ref<Expr> ObjectStatePlane::read8(ref<Expr> offset) const {
   flushForRead();
 
   if (sizeBound > 4096) {
@@ -371,7 +371,23 @@ ref<Expr> ObjectStatePlane::read8(Executor &executor, ExecutionState &state, ref
         sizeBound, allocInfo.c_str());
   }
 
-  return ReadExpr::create(getUpdates(), ZExtExpr::create(offset, Expr::Int32));
+  const UpdateList &updates = getUpdates();
+
+  if (symbolic || isa<ConstantExpr>(parent->getObject()->size)) {
+    return ReadExpr::create(updates, ZExtExpr::create(offset, Expr::Int32));
+  }
+
+  ref<Expr> cond = UltExpr::create(offset,
+                                   ConstantExpr::alloc(updates.root->constantValues.size(), Expr::Int32));
+
+  for (const UpdateNode* node = updates.head.get(); node != nullptr; node = node->next.get()) {
+    cond = OrExpr::create(EqExpr::create(offset, node->index), cond);
+  }
+  
+  return SelectExpr::create(
+      cond,
+      ReadExpr::create(updates, ZExtExpr::create(offset, Expr::Int32)),
+      ConstantExpr::alloc(initialValue, Expr::Int8));
 }
 
 void ObjectStatePlane::write8(size_t offset, uint8_t value) {
@@ -433,7 +449,7 @@ ref<Expr> ObjectStatePlane::read(Executor &executor, ExecutionState &state,
 
   // Treat bool specially, it is the only non-byte sized write we allow.
   if (width == Expr::Bool)
-    return ExtractExpr::create(read8(executor, state, offset), 0, Expr::Bool);
+    return ExtractExpr::create(read8(offset), 0, Expr::Bool);
 
   // Otherwise, follow the slow general case.
   size_t NumBytes = width / 8;
@@ -442,8 +458,7 @@ ref<Expr> ObjectStatePlane::read(Executor &executor, ExecutionState &state,
   for (size_t i = 0; i != NumBytes; ++i) {
     size_t idx = Context::get().isLittleEndian() ? i : (NumBytes - i - 1);
     ref<Expr> Byte =
-        read8(executor, state,
-              AddExpr::create(offset, ConstantExpr::create(idx, Expr::Int32)));
+        read8(AddExpr::create(offset, ConstantExpr::create(idx, Expr::Int32)));
     Res = i ? ConcatExpr::create(Byte, Res) : Byte;
   }
 

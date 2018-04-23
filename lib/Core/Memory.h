@@ -247,6 +247,7 @@ public:
   unsigned sizeBound;
 
   bool initialized;
+  bool symbolic;
 
   uint8_t initialValue;
 
@@ -294,8 +295,7 @@ private:
 
   void makeSymbolic();
 
-  ref<Expr> read8(Executor &executor, ExecutionState &state,
-                  ref<Expr> offset) const;
+  ref<Expr> read8(ref<Expr> offset) const;
   void write8(unsigned offset, ref<Expr> value);
   void write8(Executor &executor, ExecutionState &state,
               ref<Expr> offset, ref<Expr> value);
