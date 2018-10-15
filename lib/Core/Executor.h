@@ -402,7 +402,7 @@ private:
   /// Return a unique constant value for the given expression in the
   /// given state, if it has one (i.e. it provably only has a single
   /// value). Otherwise return the original expression.
-  ref<Expr> toUnique(const ExecutionState &state, ref<Expr> &e);
+  ref<Expr> toUnique(const ExecutionState &state, const ref<Expr> &e);
 
   /// Return a constant value for the given expression.  If \param concretize is
   /// true, the expression is forced to be a constant by adding a constraint if
