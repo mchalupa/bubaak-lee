@@ -1722,7 +1722,7 @@ ref<klee::ConstantExpr> Executor::getEhTypeidFor(ref<Expr> type_info) {
 }
 
 void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
-                           std::vector<ref<Expr>> &arguments) {
+                           const std::vector<Cell> &arguments) {
   Instruction *i = ki->inst;
   if (isa_and_nonnull<DbgInfoIntrinsic>(i))
     return;
@@ -1735,7 +1735,7 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
     }
     case Intrinsic::fabs: {
       ref<ConstantExpr> arg =
-          toConstant(state, arguments[0], "floating point");
+          toConstant(state, arguments[0].value, "floating point");
       if (!fpWidthToSemantics(arg->getWidth()))
         return terminateStateOnExecError(
             state, "Unsupported intrinsic llvm.fabs call");
@@ -1886,7 +1886,8 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
       // size. This happens to work for x86-32 and x86-64, however.
       Expr::Width WordSize = Context::get().getPointerWidth();
       if (WordSize == Expr::Int32) {
-        executeMemoryOperation(state, true, arguments[0],
+        // TODO segment
+        executeMemoryOperation(state, true, arguments[0].value,
                                sf.varargs->getBaseExpr(), 0);
       } else {
         assert(WordSize == Expr::Int64 && "Unknown word size!");
@@ -1894,21 +1895,20 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
         // x86-64 has quite complicated calling convention. However,
         // instead of implementing it, we can do a simple hack: just
         // make a function believe that all varargs are on stack.
-        executeMemoryOperation(
-            state, true,
-            arguments[0],
+        // TODO segment
+        executeMemoryOperation(state, true, arguments[0].value,
             ConstantExpr::create(48, 32), 0); // gp_offset
         executeMemoryOperation(
             state, true,
-            AddExpr::create(arguments[0], ConstantExpr::create(4, 64)),
+            AddExpr::create(arguments[0].value, ConstantExpr::create(4, 64)),
             ConstantExpr::create(304, 32), 0); // fp_offset
         executeMemoryOperation(
             state, true,
-            AddExpr::create(arguments[0], ConstantExpr::create(8, 64)),
+            AddExpr::create(arguments[0].value, ConstantExpr::create(8, 64)),
             sf.varargs->getBaseExpr(), 0); // overflow_arg_area
         executeMemoryOperation(
             state, true,
-            AddExpr::create(arguments[0], ConstantExpr::create(16, 64)),
+            AddExpr::create(arguments[0].value, ConstantExpr::create(16, 64)),
             ConstantExpr::create(0, 64), 0); // reg_save_area
       }
       break;
@@ -1998,7 +1998,7 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
           Type *t = cb.getParamByValType(k);
           argWidth = kmodule->targetData->getTypeSizeInBits(t);
         } else {
-          argWidth = arguments[k]->getWidth();
+          argWidth = arguments[k].value->getWidth();
         }
 
         MaybeAlign ma = cb.getParamAlign(k);
@@ -2053,9 +2053,10 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
 
         for (unsigned k = funcArgs; k < callingArgs; k++) {
           if (!cb.isByValArgument(k)) {
-            os->write(offsets[k], arguments[k]);
+            // TODO segment
+            os->write(offsets[k], arguments[k].value);
           } else {
-            ConstantExpr *CE = dyn_cast<ConstantExpr>(arguments[k]);
+            ConstantExpr *CE = dyn_cast<ConstantExpr>(arguments[k].value);
             assert(CE); // byval argument needs to be a concrete pointer
 
             ObjectPair op;
@@ -2071,7 +2072,7 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
 
     unsigned numFormals = f->arg_size();
     for (unsigned k = 0; k < numFormals; k++)
-      bindArgument(kf, k, state, arguments[k]);
+      bindArgument(kf, k, state, arguments[k].pointerSegment, arguments[k].value);
   }
 }
 
@@ -2499,11 +2500,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     Function *f = getTargetFunction(fp);
 
     // evaluate arguments
-    std::vector< ref<Expr> > arguments;
+    std::vector<Cell> arguments;
     arguments.reserve(numArgs);
 
     for (unsigned j=0; j<numArgs; ++j)
-      arguments.push_back(eval(ki, j+1, state).value);
+      arguments.push_back(eval(ki, j+1, state));
 
     if (auto* asmValue = dyn_cast<InlineAsm>(fp)) { //TODO: move to `executeCall`
       if (ExternalCalls != ExternalCallPolicy::None) {
@@ -2532,10 +2533,10 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
 
         // XXX this really needs thought and validation
         unsigned i=0;
-        for (std::vector< ref<Expr> >::iterator
+        for (std::vector<Cell>::iterator
                ai = arguments.begin(), ie = arguments.end();
              ai != ie; ++ai) {
-          Expr::Width to, from = (*ai)->getWidth();
+          Expr::Width to, from = ai->value->getWidth();
             
           if (i<fType->getNumParams()) {
             to = getWidthForLLVMType(fType->getParamType(i));
@@ -2544,9 +2545,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
               // XXX need to check other param attrs ?
               bool isSExt = cb.paramHasAttr(i, llvm::Attribute::SExt);
               if (isSExt) {
-                arguments[i] = SExtExpr::create(arguments[i], to);
+                arguments[i].value = SExtExpr::create(arguments[i].value, to);
+                arguments[i].pointerSegment = SExtExpr::create(arguments[i].pointerSegment, to);
               } else {
-                arguments[i] = ZExtExpr::create(arguments[i], to);
+                arguments[i].value = ZExtExpr::create(arguments[i].value, to);
+                arguments[i].pointerSegment = ZExtExpr::create(arguments[i].pointerSegment, to);
               }
             }
           }
@@ -3984,7 +3987,7 @@ static std::set<std::string> okExternals(okExternalsList,
 
 void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
                                     KCallable *callable,
-                                    std::vector<ref<Expr>> &arguments) {
+                                    const std::vector<Cell> &arguments) {
   // check if specialFunctionHandler wants it
   if (const auto *func = dyn_cast<KFunction>(callable);
       func &&
@@ -4008,12 +4011,12 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   uint64_t *args = (uint64_t *)alloca(allocatedBytes);
   memset(args, 0, allocatedBytes);
   unsigned wordIndex = 2;
-  for (auto &a : arguments) {
+  for (const auto &a : arguments) {
     if (ExternalCalls == ExternalCallPolicy::All ||
         ExternalCalls == ExternalCallPolicy::OverApprox) {
-      a = optimizer.optimizeExpr(a, true);
+      auto value = optimizer.optimizeExpr(a.value, true);
       ref<ConstantExpr> cvalue = toConstant(
-          state, a, "external call", ExternalCalls == ExternalCallPolicy::All);
+          state, value, "external call", ExternalCalls == ExternalCallPolicy::All);
       cvalue->toMemory(&args[wordIndex]);
 
       // If the argument points to a valid and writable object, concretise it
@@ -4028,7 +4031,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
       wordIndex += (cvalue->getWidth() + 63) / 64;
     } else {
-      ref<Expr> arg = toUnique(state, a);
+      ref<Expr> arg = toUnique(state, a.value);
       if (ConstantExpr *ce = dyn_cast<ConstantExpr>(arg)) {
         // fp80 must be aligned to 16 according to the System V AMD 64 ABI
         if (ce->getWidth() == Expr::Fl80 && wordIndex & 0x01)
@@ -4102,7 +4105,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
     llvm::raw_string_ostream os(TmpStr);
     os << "calling external: " << callable->getName().str() << "(";
     for (unsigned i = 0; i < arguments.size(); i++) {
-      os << arguments[i];
+      os << arguments[i].value;
       if (i != arguments.size() - 1)
         os << ", ";
     }
