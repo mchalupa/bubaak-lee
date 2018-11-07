@@ -4472,7 +4472,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
         if (ptrval < MemoryManager::pageSize) {
           terminateStateOnProgramError(
               *unbound, "memory error: null page access",
-              StateTerminationType::Ptr, getAddressInfo(*unbound, address));
+              StateTerminationType::Ptr, getAddressInfo(*unbound, addressOptim));
           return;
         } else if (MemoryManager::isDeterministic) {
           using kdalloc::LocationInfo;
@@ -4488,7 +4488,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
                     KValue(zeroSeg, cast<ConstantExpr>(baseExpr)), baseOp)) {
               terminateStateOnProgramError(
                   *unbound, "memory error: use after free",
-                  StateTerminationType::Ptr, getAddressInfo(*unbound, address));
+                  StateTerminationType::Ptr, getAddressInfo(*unbound, addressOptim));
               return;
             }
           }
@@ -4496,7 +4496,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
       }
       terminateStateOnProgramError(
           *unbound, "memory error: out of bound pointer",
-          StateTerminationType::Ptr, getAddressInfo(*unbound, address));
+          StateTerminationType::Ptr, getAddressInfo(*unbound, addressOptim));
     }
   }
 }
