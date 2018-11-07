@@ -3993,6 +3993,19 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
       wordIndex += (cvalue->getWidth() + 63) / 64;
     } else {
+      // we are allowed external calls with concrete arguments only
+      auto segmentExpr = toUnique(state, a.getSegment());
+      if (!isa<ConstantExpr>(segmentExpr)) {
+        terminateStateOnExecError(state,
+                                  "external call with symbolic segment argument: " +
+                                  function->getName());
+        return;
+      }
+
+      if (!segmentExpr->isZero()) {
+          klee_warning("passing pointer to external call, may not work properly");
+      }
+
       ref<Expr> arg = toUnique(state, a.value);
       if (ConstantExpr *ce = dyn_cast<ConstantExpr>(arg)) {
         // fp80 must be aligned to 16 according to the System V AMD 64 ABI
