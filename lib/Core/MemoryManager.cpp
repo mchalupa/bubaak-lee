@@ -395,7 +395,7 @@ bool MemoryManager::markMappingsAsUnneeded() {
   return true;
 }
 
-size_t MemoryManager::getUsedDeterministicSize() {
+size_t MemoryManager::getUsedDeterministicSize() const {
   // TODO: implement
   return 0;
 }

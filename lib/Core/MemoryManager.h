@@ -26,6 +26,7 @@ class ArrayCache;
 class ExecutionState;
 class MemoryObject;
 
+
 class MemoryManager {
 private:
   typedef std::set<MemoryObject *> objects_ty;
@@ -37,6 +38,7 @@ private:
 
   kdalloc::AllocatorFactory constantsFactory;
   kdalloc::Allocator constantsAllocator;
+
 
   uint64_t lastSegment;
 
@@ -72,7 +74,7 @@ public:
   /*
    * Returns the size used by deterministic allocation in bytes
    */
-  size_t getUsedDeterministicSize();
+  size_t getUsedDeterministicSize() const;
 };
 
 } // End klee namespace
