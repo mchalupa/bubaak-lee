@@ -600,6 +600,7 @@ Executor::setModule(std::vector<std::unique_ptr<llvm::Module>> &modules,
   DataLayout *TD = kmodule->targetData.get();
   Context::initialize(TD->isLittleEndian(),
                       (Expr::Width)TD->getPointerSizeInBits());
+  memory->useLowMemory(TD->getPointerSizeInBits() == 32);
 
   return kmodule->module.get();
 }
