@@ -199,7 +199,7 @@ void ObjectStatePlane::flushToConcreteStore(Executor &executor,
 void ObjectStatePlane::makeConcrete() {
   concreteMask.resize(0);
   unflushedMask.resize(0);
-  knownSymbolics.resize(0);
+  knownSymbolics.clear();
 }
 
 void ObjectStatePlane::makeSymbolic() {
@@ -233,6 +233,8 @@ isByteUnflushed(i) => (isByteConcrete(i) || isByteKnownSymbolic(i))
  */
 
 void ObjectStatePlane::flushForRead() const {
+  // TODO: iterate only over the offsets for which we have information
+  // (SparseVector may be, well, sparse...)
   for (unsigned offset = 0; offset < sizeBound; offset++) {
     if (isByteUnflushed(offset)) {
       if (isByteConcrete(offset)) {
@@ -287,8 +289,8 @@ bool ObjectStatePlane::isByteUnflushed(size_t offset) const {
   return initialized;
 }
 
-bool ObjectStatePlane::isByteKnownSymbolic(size_t offset) const {
-  return offset < knownSymbolics.size() && knownSymbolics[offset].get();
+bool ObjectStatePlane::isByteKnownSymbolic(unsigned offset) const {
+  return knownSymbolics.has(offset);
 }
 
 void ObjectStatePlane::markByteConcrete(size_t offset) {
@@ -329,12 +331,7 @@ void ObjectStatePlane::markByteFlushed(size_t offset) const {
 
 void ObjectStatePlane::setKnownSymbolic(size_t offset,
                                         Expr *value /* can be null */) {
-  if (knownSymbolics.size() <= offset) {
-    if (!value)
-      return;
-    knownSymbolics.resize(sizeBound);
-  }
-  knownSymbolics[offset] = value;
+  knownSymbolics.set(offset, value);
 }
 
 uint8_t ObjectStatePlane::getConcreteValue(unsigned offset) const {
