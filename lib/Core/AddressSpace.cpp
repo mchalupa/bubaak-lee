@@ -395,10 +395,18 @@ std::size_t AddressSpace::copyOutConcretes() {
       numPages +=
           (size + MemoryManager::pageSize - 1) / MemoryManager::pageSize;
       auto address = reinterpret_cast<std::uint8_t*>(mo->address);
-      auto &concreteStore = os->offsetPlane->concreteStore;
-      concreteStore.resize(os->offsetPlane->sizeBound,
-                           os->offsetPlane->initialValue);
-      memcpy(address, concreteStore.data(), concreteStore.size());
+
+      // if the allocated real virtual process' memory
+      // is less that the size bound, do not try to write to it...
+      if (os->getSizeBound() > mo->allocatedSize)
+        continue;
+
+      if (!os->readOnly) {
+        auto &concreteStore = os->offsetPlane->concreteStore;
+        concreteStore.resize(os->offsetPlane->sizeBound,
+                             os->offsetPlane->initialValue);
+        memcpy(address, concreteStore.data(), concreteStore.size());
+      }
     }
   }
   return numPages;

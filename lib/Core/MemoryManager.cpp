@@ -286,11 +286,13 @@ MemoryObject *MemoryManager::allocate(ref<Expr> size, bool isLocal,
     concreteSize = CE->getZExtValue();
   }
 
-  if (concreteSize > 10 * 1024 * 1024)
+  if (concreteSize > 10 * 1024 * 1024) {
     klee_warning_once(nullptr,
                       "Large memory allocation (%" PRIu64 " bytes). "
                       "KLEE may run out of memory.",
                       concreteSize);
+    hasConcreteSize = false;
+  }
 
   // Return NULL if size is zero, this is equal to error during allocation
   if (NullOnZeroMalloc && hasConcreteSize && concreteSize == 0)
@@ -343,9 +345,9 @@ MemoryObject *MemoryManager::allocate(ref<Expr> size, bool isLocal,
     return 0;
 
   ++stats::allocations;
-  MemoryObject *res = new MemoryObject(address, size, alignment, isLocal,
-                                       isGlobal, false, allocSite, this);
-  res->segment = ++lastSegment;
+  MemoryObject *res = new MemoryObject(++lastSegment, (uint64_t)address,
+                                       size, concreteSize,
+                                       isLocal, isGlobal, false, allocSite, this);
   objects.insert(res);
   return res;
 }
@@ -368,7 +370,7 @@ MemoryObject *MemoryManager::allocateFixed(uint64_t address, uint64_t size,
   ++stats::allocations;
   ref<Expr> sizeExpr = ConstantExpr::alloc(size, Context::get().getPointerWidth());
   MemoryObject *res =
-      new MemoryObject(++lastSegment, address, sizeExpr, false, true, true, allocSite, this);
+      new MemoryObject(++lastSegment, address, sizeExpr, size, false, true, true, allocSite, this);
   objects.insert(res);
   return res;
 }

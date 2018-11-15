@@ -55,6 +55,9 @@ public:
   /// size in bytes
   ref<Expr> size;
   size_t alignment;
+  // size of real virtual process memory allocated
+  // for this object (this memory may be passed to external calls).
+  uint64_t allocatedSize = 0;
   mutable std::string name;
 
   bool isLocal;
@@ -107,6 +110,7 @@ public:
   }
 
     MemoryObject(uint64_t segment, uint64_t _address, ref<Expr> _size,
+                 uint64_t _allocatedSize,
                  bool _isLocal, bool _isGlobal, bool _isFixed,
                  const llvm::Value *_allocSite,
                  MemoryManager *_parent)
@@ -114,6 +118,7 @@ public:
       segment(segment),
       address(_address),
       size(ZExtExpr::create(_size, Context::get().getPointerWidth())),
+      allocatedSize(_allocatedSize),
       name("unnamed"),
       isLocal(_isLocal),
       isGlobal(_isGlobal),
@@ -422,6 +427,11 @@ public:
 
   void setReadOnly(bool ro) {
     readOnly = ro;
+  }
+
+  // get upper bound on the size of this object if it is known
+  uint64_t getSizeBound() const {
+    return offsetPlane->sizeBound;
   }
 
   // make contents all concrete and zero

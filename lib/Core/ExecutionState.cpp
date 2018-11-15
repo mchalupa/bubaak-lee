@@ -163,9 +163,9 @@ void ExecutionState::deallocate(const MemoryObject *mo) {
 
   auto address = reinterpret_cast<void *>(mo->address);
   if (mo->isLocal) {
-    stackAllocator.free(address, std::max(mo->size, mo->alignment));
+    stackAllocator.free(address, (size_t)std::max(mo->allocatedSize, (uint64_t)mo->alignment));
   } else {
-    heapAllocator.free(address, std::max(mo->size, mo->alignment));
+    heapAllocator.free(address, (size_t)std::max(mo->allocatedSize, (uint64_t)mo->alignment));
   }
 }
 

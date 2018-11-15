@@ -4019,6 +4019,14 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
       if (ObjectPair op;
           cvalue->getWidth() == Context::get().getPointerWidth() &&
           state.addressSpace.resolveOne(zeroSegment, cvalue, op) && !op.second->readOnly) {
+        if (op.first->allocatedSize > 0 &&
+            op.second->getSizeBound() > op.first->allocatedSize) {
+          terminateStateOnExecError(state,
+                                    "external call with symbolic-sized object that "
+                                    "has no real virtual process memory: " +
+                                    function->getName());
+          return;
+        }
         auto *os = state.addressSpace.getWriteable(op.first, op.second);
         os->flushToConcreteStore(*this, state,
                                  ExternalCalls == ExternalCallPolicy::All);
@@ -4035,8 +4043,25 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
         return;
       }
 
-      if (!segmentExpr->isZero()) {
+      if (!segmentExpr->isZero() ||
+          ai->getOffset()->getWidth() == Context::get().getPointerWidth()) {
+        ObjectPair op;
+        bool success;
+        state.addressSpace.resolveOne(state, solver, *ai, op, success);
+        if (success) {
+            klee_warning("bound: %lu, alloc size: %lu\n",
+                         op.second->getSizeBound(), op.first->allocatedSize);
+          if (op.second->getSizeBound() == 0 ||
+              (op.second->getSizeBound() > op.first->allocatedSize)) {
+            terminateStateOnExecError(state,
+                                      "external call with symbolic-sized object that "
+                                      "has no real virtual process memory: " +
+                                      function->getName());
+            return;
+          }
+
           klee_warning("passing pointer to external call, may not work properly");
+        }
       }
 
       ref<Expr> arg = toUnique(state, a.value);
