@@ -4024,7 +4024,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
           terminateStateOnExecError(state,
                                     "external call with symbolic-sized object that "
                                     "has no real virtual process memory: " +
-                                    function->getName());
+                                    callable->getName());
           return;
         }
         auto *os = state.addressSpace.getWriteable(op.first, op.second);
@@ -4056,7 +4056,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
             terminateStateOnExecError(state,
                                       "external call with symbolic-sized object that "
                                       "has no real virtual process memory: " +
-                                      function->getName());
+                                      callable->getName());
             return;
           }
 
