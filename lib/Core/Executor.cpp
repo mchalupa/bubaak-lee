@@ -1509,8 +1509,14 @@ void Executor::executeLifetimeIntrinsic(ExecutionState &state,
   if (!success) {
     // the object is dead, create a new one
     // XXX: we should distringuish between resolve error and dead object...
-    executeAlloc(state, getSizeForAlloca(state, kinstMem), true /* isLocal */,
-                 kinstMem);
+    if (!isEnd) {
+      executeAlloc(state, getSizeForAlloca(state, kinstMem), true /* isLocal */,
+                   kinstMem);
+    } else {
+      //klee_warning("Could not find allocation for lifetime end");
+      terminateStateOnError(state, "Memory object is dead",
+                            StateTerminationType::Ptr);
+    }
     return;
   }
 
@@ -1521,8 +1527,11 @@ void Executor::executeLifetimeIntrinsic(ExecutionState &state,
   if (isEnd) {
     state.addressSpace.unbindObject(op.first);
   } else {
-    executeAlloc(state, getSizeForAlloca(state, kinstMem), true /* isLocal */,
-                 kinstMem, false /* zeroMem */, op.second /* realloc from */);
+    // This is the first call to lifetime start, the object already exists.
+    // We do not want to reallocate it as there may exist pointers to it
+
+    //executeAlloc(state, getSizeForAlloca(state, kinstMem), true /* isLocal */,
+    //             kinstMem, false /* zeroMem */, op.second /* realloc from */);
   }
 }
 
