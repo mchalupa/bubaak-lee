@@ -397,8 +397,6 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
       case Intrinsic::get_dynamic_area_offset:
       case Intrinsic::invariant_end:
       case Intrinsic::invariant_start:
-      case Intrinsic::lifetime_end:
-      case Intrinsic::lifetime_start:
       case Intrinsic::log10:
       case Intrinsic::log2:
       case Intrinsic::log:
