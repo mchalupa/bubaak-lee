@@ -309,6 +309,7 @@ public:
 
   void pushFrame(KInstIterator caller, KFunction *kf);
   void popFrame();
+  void removeAlloca(const MemoryObject *mo);
 
   void deallocate(const MemoryObject *mo);
 
