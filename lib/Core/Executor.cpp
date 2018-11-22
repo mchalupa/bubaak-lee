@@ -3854,11 +3854,31 @@ static bool hasMemoryLeaks(ExecutionState &state) {
   return false;
 }
 
+static std::vector<const MemoryObject *> getMemoryLeaks(ExecutionState &state) {
+    std::vector<const MemoryObject *> leaks;
+    for (auto& object : state.addressSpace.objects) {
+        if (!object.first->isLocal && !object.first->isGlobal
+            && !object.first->isFixed) {
+            // => is heap-allocated
+            leaks.push_back(object.first);
+        }
+    }
+
+    return leaks;
+}
+
 void Executor::terminateStateOnExit(ExecutionState &state) {
   ++stats::terminationExit;
   if (CheckLeaks && hasMemoryLeaks(state)) {
+    auto leaks = getMemoryLeaks(state);
+    if (leaks.empty())
+      return;
+    std::string info;
+    for (const auto *mo : leaks) {
+      info += getAddressInfo(state, mo->getPointer());
+    }
     terminateStateOnProgramError(state, "memory error: memory leak detected",
-                                 StateTerminationType::Leak);
+                                 StateTerminationType::Leak, info);
   } else {
     if (ExitOnErrorType.empty() &&
         (shouldWriteTest(state) || (AlwaysOutputSeeds && seedMap.count(&state))))
