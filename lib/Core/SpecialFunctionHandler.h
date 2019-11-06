@@ -122,6 +122,7 @@ namespace klee {
     HANDLER(handleWarningOnce);
     HANDLER(handleScopeEnter);
     HANDLER(handleScopeLeave);
+    HANDLER(handleVerifierNondetInt);
 #undef HANDLER
   };
 } // End klee namespace
