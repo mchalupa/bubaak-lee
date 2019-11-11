@@ -4622,7 +4622,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
 }
 
 ref<Expr> Executor::createNondetValue(ExecutionState &state,
-                                      unsigned size,
+                                      unsigned size, bool isSigned,
                                       KInstruction *kinst,
                                       const std::string &name) {
   assert(!replayKTest);
@@ -4636,8 +4636,8 @@ ref<Expr> Executor::createNondetValue(ExecutionState &state,
 
   const Array *array = arrayCache.CreateArray(uniqueName, size);
   auto expr = Expr::createTempRead(array, size);
-  auto& nv = state.addNondetValue(expr, name);
 
+  auto& nv = state.addNondetValue(expr, isSigned, name);
   nv.kinstruction = kinst;
   nv.seqNum = id;
 
@@ -4989,9 +4989,10 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
 }
 
 // get a sequence of inputs that drive the program to this state
-std::vector<std::vector<unsigned char>>
+std::vector<ConcreteValue>
 Executor::getTestVector(const ExecutionState &state) {
-  std::vector<std::vector<unsigned char>> res;
+  std::vector<ConcreteValue> res;
+  res.reserve(state.nondetValues.size());
 
   for (auto& it : state.nondetValues) {
     ref<ConstantExpr> value;
@@ -5000,14 +5001,12 @@ Executor::getTestVector(const ExecutionState &state) {
     assert(success && "FIXME: Unhandled solver failure");
     (void) success;
 
-    auto size = it.expr->getWidth()/8;
-    assert(size <= 8 && "Does not support size > 8");
-    std::vector<uint8_t> data;
-    data.resize(size);
-
+    auto size = it.expr->getWidth();
+    assert(size <= 64 && "Does not support bitwidth > 64");
+    // XXX: SExtValue for signed types?
     uint64_t val = value->getZExtValue();
-    memcpy(data.data(), &val, size);
-    res.emplace_back(std::move(data));
+
+    res.emplace_back(size, val, it.isSigned);
   }
   return res;
 }
