@@ -658,7 +658,7 @@ void KleeHandler::processTestCase(const ExecutionState &state,
     }
 
     if (WriteTestCases) {
-      if (auto f = openTestFile("xml", id)) {
+      if (auto f = openTestFile("xml", test_id)) {
         // write the header
         *f <<
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
@@ -666,7 +666,11 @@ void KleeHandler::processTestCase(const ExecutionState &state,
         "\"+//IDN sosy-lab.org//DTD test-format testcase 1.1//EN\""
         "\"https://sosy-lab.org/test-format/testcase-1.1.dtd\">\n\n";
 
-        *f << "<testcase>\n";
+        if (errorMessage) {
+          *f << "<testcase coversError=\"true\">\n";
+        } else {
+          *f << "<testcase>\n";
+        }
 
         auto testvec = m_interpreter->getTestVector(state);
         for (auto& input : testvec) {
@@ -674,6 +678,8 @@ void KleeHandler::processTestCase(const ExecutionState &state,
         }
 
         *f << "</testcase>\n";
+
+        ++m_numGeneratedTests;
       } else {
         klee_warning("unable to write test-case file, losing it");
       }
