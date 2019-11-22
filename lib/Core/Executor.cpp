@@ -4210,7 +4210,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
     if (size > 64) {
         klee_warning_once(target, "Undefined function returns > 64bit object: %s",
                           function->getName().str().c_str());
-        terminateStateOnUserError(state, "external call failed");
+        terminateStateOnUserError(state, "failed external call");
         return;
     }
 
