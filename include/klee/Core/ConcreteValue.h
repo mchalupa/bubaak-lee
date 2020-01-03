@@ -13,7 +13,7 @@
 #include "klee/Config/Version.h"
 
 #include "llvm/ADT/APInt.h"
-#include "llvm/ADT/Optional.h"
+#include <optional>
 #if LLVM_VERSION_CODE >= LLVM_VERSION(13, 0)
 #include "llvm/ADT/StringExtras.h"
 #endif
@@ -24,7 +24,7 @@ class ConcreteValue {
 
     // FIXME: turn this info an identifier like: (line, col, seq),
     // so that we can use that in sliced programs
-    llvm::Optional<llvm::APInt> pointer; // if set, value is offset
+    std::optional<llvm::APInt> pointer; // if set, value is offset
 
     llvm::APInt value;
 

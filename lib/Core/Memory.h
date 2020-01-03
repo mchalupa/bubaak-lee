@@ -18,6 +18,7 @@
 
 #include "llvm/ADT/StringExtras.h"
 
+#include <optional>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -73,6 +74,9 @@ public:
   /// it was allocated for (or whatever else makes sense).
   const llvm::Value *allocSite;
 
+  /// Symbolic address for poiner comparison
+  std::optional<const Array*> symbolicAddress;
+
   // DO NOT IMPLEMENT
   MemoryObject(const MemoryObject &b);
   MemoryObject &operator=(const MemoryObject &b);
@@ -80,10 +84,9 @@ public:
 public:
   // XXX this is just a temp hack, should be removed
   explicit
-  MemoryObject(uint64_t _address) 
+  MemoryObject()
     : id(counter++),
       segment(0),
-      address(_address),
       size(0),
       alignment(0),
       isFixed(true),
@@ -133,6 +136,12 @@ public:
   /// Get an identifying string for this allocation.
   void getAllocInfo(std::string &result) const;
 
+  /// If not initialized, creates symbolic array representing it's address
+  /// and returns ref<Expr> for it
+  /// \param array ArrayCache for creating the symbolic array
+  /// @return symbolic array representing symbolic address of given MO
+  ref<Expr> getSymbolicAddress(klee::ArrayCache &array);
+
   void setName(std::string name) const {
     this->name = name;
   }
@@ -144,19 +153,17 @@ public:
     return ConstantExpr::create(segment, Context::get().getPointerWidth());
   }
   ref<ConstantExpr> getBaseExpr() const {
-    return ConstantExpr::create(address, Context::get().getPointerWidth());
+    return ConstantExpr::create(0, Context::get().getPointerWidth());
   }
   KValue getPointer() const {
     return KValue(getSegmentExpr(), getBaseExpr());
   }
   KValue getPointer(uint64_t offset) const {
     return KValue(getSegmentExpr(),
-                  AddExpr::create(getBaseExpr(),
-                                  ConstantExpr::create(offset,
-                                                       Context::get().getPointerWidth())));
+                  ConstantExpr::create(offset, Context::get().getPointerWidth()));
   }
-  std::string getAddressString() const {
-    return std::to_string(address);
+  std::string getSegmentString() const {
+    return "Segment: [" + std::to_string(segment) + "]";
   }
   std::string getSizeString() const {
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(size)) {
@@ -174,12 +181,12 @@ public:
   ref<Expr> getBoundsCheckPointer(KValue pointer) const {
     return AndExpr::create(
             getBoundsCheckSegment(pointer.getSegment()),
-            getBoundsCheckOffset(getOffsetExpr(pointer.getOffset())));
+            getBoundsCheckOffset(pointer.getOffset()));
   }
   ref<Expr> getBoundsCheckPointer(KValue pointer, unsigned bytes) const {
     return AndExpr::create(
             getBoundsCheckSegment(pointer.getSegment()),
-            getBoundsCheckOffset(getOffsetExpr(pointer.getOffset()), bytes));
+            getBoundsCheckOffset(pointer.getOffset(), bytes));
   }
   ref<Expr> getBoundsCheckOffset(ref<Expr> offset) const {
     if (isa<ConstantExpr>(size) && cast<ConstantExpr>(size)->isZero()) {
@@ -203,8 +210,6 @@ public:
     // Short-cut with id
     if (id == b.id)
       return 0;
-    if (address != b.address)
-      return (address < b.address ? -1 : 1);
 
     if (size != b.size)
       return (size < b.size ? -1 : 1);
@@ -217,9 +222,7 @@ public:
 
 private:
   ref<Expr> getBoundsCheckSegment(ref<Expr> segment) const {
-    return OrExpr::create(
-            EqExpr::create(segment, ConstantExpr::alloc(0, segment->getWidth())),
-            EqExpr::create(getSegmentExpr(), segment));
+    return EqExpr::create(getSegmentExpr(), segment);
   }
 };
 
@@ -338,17 +341,19 @@ public:
 
   ref<Expr> read(Executor &executor, ExecutionState &state,
                  ref<Expr> offset, Expr::Width width) const;
-  ref<Expr> read(unsigned offset, Expr::Width width) const;
+  ref<Expr> read(ref<Expr> offset, Expr::Width width) const;
+  ref<Expr> read(size_t offset, Expr::Width width) const;
   ref<Expr> read8(unsigned offset) const;
 
-  void write(unsigned offset, ref<Expr> value);
+  void write(size_t offset, ref<Expr> value);
+  void write(ref<Expr> offset, ref<Expr> value);
   void write(Executor &executor, ExecutionState &state,
              ref<Expr> offset, ref<Expr> value);
 
-  void write8(unsigned offset, uint8_t value);
-  void write16(unsigned offset, uint16_t value);
-  void write32(unsigned offset, uint32_t value);
-  void write64(unsigned offset, uint64_t value);
+  void write8(size_t offset, uint8_t value);
+  void write16(size_t offset, uint16_t value);
+  void write32(size_t offset, uint32_t value);
+  void write64(size_t offset, uint64_t value);
   void print() const;
 
   void flushToConcreteStore(Executor &executor, ExecutionState &state,
@@ -362,7 +367,8 @@ private:
   void makeSymbolic();
 
   ref<Expr> read8(ref<Expr> offset) const;
-  void write8(unsigned offset, ref<Expr> value);
+  void write8(size_t offset, ref<Expr> value);
+  void write8(ref<Expr> offset, ref<Expr> value);
   void write8(Executor &executor, ExecutionState &state,
               ref<Expr> offset, ref<Expr> value);
 
@@ -370,19 +376,19 @@ private:
   void flushForWrite();
 
   /// isByteConcrete ==> !isByteKnownSymbolic
-  bool isByteConcrete(unsigned offset) const;
+  bool isByteConcrete(size_t offset) const;
 
   /// isByteKnownSymbolic ==> !isByteConcrete
   bool isByteKnownSymbolic(unsigned offset) const;
 
   /// isByteUnflushed(i) => (isByteConcrete(i) || isByteKnownSymbolic(i))
-  bool isByteUnflushed(unsigned offset) const;
+  bool isByteUnflushed(size_t offset) const;
 
-  void markByteConcrete(unsigned offset);
-  void markByteSymbolic(unsigned offset);
-  void markByteFlushed(unsigned offset) const;
-  void markByteUnflushed(unsigned offset) const;
-  void setKnownSymbolic(unsigned offset, Expr *value);
+  void markByteConcrete(size_t offset);
+  void markByteSymbolic(size_t offset);
+  void markByteFlushed(size_t offset) const;
+  void markByteUnflushed(size_t offset) const;
+  void setKnownSymbolic(size_t offset, Expr *value);
   uint8_t getConcreteValue(unsigned offset) const;
 };
 

@@ -75,6 +75,16 @@ void MemoryObject::getAllocInfo(std::string &result) const {
   info.flush();
 }
 
+ref<Expr> MemoryObject::getSymbolicAddress(klee::ArrayCache &array) {
+  if (!symbolicAddress) {
+    symbolicAddress = array.CreateArray(
+        std::string("mo_addr_for_seg:") + std::to_string(segment),
+        Context::get().getPointerWidth());
+  }
+  return Expr::createTempRead(symbolicAddress.value(),
+                              Context::get().getPointerWidth());
+}
+
 /***/
 
 ObjectStatePlane::ObjectStatePlane(const ObjectState *parent)
@@ -504,6 +514,50 @@ void ObjectStatePlane::write(Executor &executor, ExecutionState &state,
   for (size_t i = 0; i != NumBytes; ++i) {
     size_t idx = Context::get().isLittleEndian() ? i : (NumBytes - i - 1);
     write8(executor, state, AddExpr::create(offset, ConstantExpr::create(idx, Expr::Int32)),
+           ExtractExpr::create(value, 8 * i, Expr::Int8));
+  }
+}
+
+ref<Expr> ObjectStatePlane::read(ref<Expr> offset, Expr::Width width) const {
+  offset = ZExtExpr::create(offset, Expr::Int32);
+  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(offset))
+    return read(CE->getZExtValue(32), width);
+  if (width == Expr::Bool)
+    return ExtractExpr::create(read8(offset), 0, Expr::Bool);
+  size_t NumBytes = width / 8;
+  assert(width == NumBytes * 8 && "Invalid read size!");
+  ref<Expr> Res(0);
+  for (size_t i = 0; i != NumBytes; ++i) {
+    size_t idx = Context::get().isLittleEndian() ? i : (NumBytes - i - 1);
+    ref<Expr> Byte = read8(AddExpr::create(offset, ConstantExpr::create(idx, Expr::Int32)));
+    Res = i ? ConcatExpr::create(Byte, Res) : Byte;
+  }
+  return Res;
+}
+
+void ObjectStatePlane::write8(ref<Expr> offset, ref<Expr> value) {
+  assert(!isa<ConstantExpr>(offset) &&
+         "constant offset passed to symbolic write8");
+  flushForWrite();
+  updates.extend(ZExtExpr::create(offset, Expr::Int32), value);
+}
+
+void ObjectStatePlane::write(ref<Expr> offset, ref<Expr> value) {
+  offset = ZExtExpr::create(offset, Expr::Int32);
+  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(offset)) {
+    write(CE->getZExtValue(32), value);
+    return;
+  }
+  Expr::Width w = value->getWidth();
+  if (w == Expr::Bool) {
+    write8(offset, ZExtExpr::create(value, Expr::Int8));
+    return;
+  }
+  size_t NumBytes = w / 8;
+  assert(w == NumBytes * 8 && "Invalid write size!");
+  for (size_t i = 0; i != NumBytes; ++i) {
+    size_t idx = Context::get().isLittleEndian() ? i : (NumBytes - i - 1);
+    write8(AddExpr::create(offset, ConstantExpr::create(idx, Expr::Int32)),
            ExtractExpr::create(value, 8 * i, Expr::Int8));
   }
 }

@@ -95,6 +95,7 @@ class Executor : public Interpreter {
   friend class StatsTracker;
   friend class MergeHandler;
   friend class ObjectState;
+  friend class ObjectStatePlane;
   friend klee::Searcher *klee::constructUserSearcher(Executor &executor);
 
 public:
@@ -218,8 +219,7 @@ private:
   /// Return the typeid corresponding to a certain `type_info`
   ref<ConstantExpr> getEhTypeidFor(ref<Expr> type_info);
 
-  llvm::Function* getTargetFunction(llvm::Value *calledVal,
-                                    ExecutionState &state);
+  llvm::Function* getTargetFunction(llvm::Value *calledVal);
 
   void executeInstruction(ExecutionState &state, KInstruction *ki);
 
@@ -228,7 +228,8 @@ private:
   // Given a concrete object in our [klee's] address space, add it to 
   // objects checked code can reference.
   MemoryObject *addExternalObject(ExecutionState &state, void *addr, 
-                                  unsigned size, bool isReadOnly);
+                                  unsigned size, bool isReadOnly,
+                                  uint64_t specialSegment = 0);
 
   void initializeGlobalAlias(const llvm::Constant *c);
   void initializeGlobalObject(ExecutionState &state, ObjectState *os, 
@@ -292,7 +293,7 @@ private:
                     bool isLocal,
                     KInstruction *target,
                     bool zeroMemory=false,
-                    const ObjectState *reallocFrom=0,
+                    const ObjectState *reallocFrom=nullptr,
                     size_t allocationAlignment=0);
 
   ref<Expr> getSizeForAlloca(ExecutionState& state, KInstruction *ki) const;
@@ -446,7 +447,7 @@ private:
   void executeGetValue(ExecutionState &state, const KValue& e, KInstruction *target);
 
   /// Get textual information regarding a memory address.
-  std::string getAddressInfo(ExecutionState &state, const KValue &address) const;
+  std::string getKValueInfo(ExecutionState &state, const KValue &address) const;
 
   // Determines the \param lastInstruction of the \param state which is not KLEE
   // internal and returns its InstructionInfo

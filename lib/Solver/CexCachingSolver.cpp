@@ -48,6 +48,11 @@ cl::opt<bool>
                               "before asking the SMT solver (default=false)"),
                      cl::cat(SolvingCat));
 
+cl::opt<bool> CexCacheExperimental(
+    "cex-cache-exp", cl::init(false),
+    cl::desc("Optimization for validity queries (default=false)"),
+    cl::cat(SolvingCat));
+
 } // namespace
 
 ///

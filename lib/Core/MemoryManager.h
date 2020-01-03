@@ -63,8 +63,9 @@ public:
   MemoryObject *allocate(ref<Expr> size, bool isLocal, bool isGlobal,
                          ExecutionState *state, const llvm::Value *allocSite,
                          size_t alignment);
-  MemoryObject *allocateFixed(uint64_t address, uint64_t size,
-                              const llvm::Value *allocSite);
+  MemoryObject *allocateFixed(uint64_t size, const llvm::Value *allocSite,
+                              uint64_t specialSegment = 0);
+  void deallocate(const MemoryObject *mo);
   void markFreed(MemoryObject *mo);
   bool markMappingsAsUnneeded();
   ArrayCache *getArrayCache() const { return arrayCache; }
@@ -73,6 +74,15 @@ public:
    * Returns the size used by deterministic allocation in bytes
    */
   size_t getUsedDeterministicSize() const;
+
+  void useLowMemory(bool /*lm*/) {}
+
+  void *allocateMemory(size_t size, size_t alignment) {
+    void *ptr = nullptr;
+    if (posix_memalign(&ptr, alignment < sizeof(void*) ? sizeof(void*) : alignment, size) != 0)
+      return nullptr;
+    return ptr;
+  }
 };
 
 } // End klee namespace

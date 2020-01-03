@@ -736,7 +736,7 @@ void KleeHandler::processTestCase(const ExecutionState &state,
     }
 
     if (WriteWitness) {
-      if (auto witness = openTestFile("graphml", id)) {
+      if (auto witness = openTestFile("graphml", test_id)) {
 
         *witness << "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n" ;
         *witness << "<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\" "
@@ -848,7 +848,7 @@ void KleeHandler::processTestCase(const ExecutionState &state,
     }
 
     if (WriteHarness) {
-      if (auto harness = openTestFile("harness.c", id)) {
+      if (auto harness = openTestFile("harness.c", test_id)) {
 
         *harness << "#include <assert.h>\n" ;
         *harness << "void abort(void) __attribute__((noreturn));\n" ;

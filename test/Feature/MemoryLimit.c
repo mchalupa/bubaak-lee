@@ -1,6 +1,9 @@
 // On Darwin, we don't use tcmalloc or similar allocators, therefore reporting used memory is imprecise
 // REQUIRES: not-darwin
 //
+// XFAIL: *
+// We do not have limits on memory with our symbolic memory.
+//
 // Check that we properly kill states when we exceed our memory bounds, for both
 // small and large allocations (large allocations commonly use mmap(), which can
 // follow a separate path in the allocator and statistics reporting).
