@@ -149,6 +149,8 @@ static constexpr std::array handlerInfo = {
   add("__VERIFIER_nondet_unsigned", handleVerifierNondetUnsigned, true),
   add("__VERIFIER_nondet_ushort", handleVerifierNondetUShort, true),
 
+  add("__VERIFIER_assume", handleAssume, false),
+
 #ifdef SUPPORT_KLEE_EH_CXX
   add("_klee_eh_Unwind_RaiseException_impl", handleEhUnwindRaiseExceptionImpl, false),
   add("klee_eh_typeid_for", handleEhTypeid, true),
