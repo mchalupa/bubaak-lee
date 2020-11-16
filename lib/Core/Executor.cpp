@@ -4021,9 +4021,9 @@ static void getPointers(const llvm::Type *type,
   }
 }
 
-std::set<const MemoryObject *>
-Executor::getReachableMemoryObjects(ExecutionState &state) {
-    std::set<const MemoryObject *> reachable;
+bool
+Executor::getReachableMemoryObjects(ExecutionState &state,
+                                    std::set<const MemoryObject *>& reachable) {
     std::set<ObjectPair> queue;
 
     DataLayout& DL = *kmodule->targetData;
@@ -4045,6 +4045,8 @@ Executor::getReachableMemoryObjects(ExecutionState &state) {
         queue.emplace(object.first, object.second.get());
       }
     }
+
+    bool retval = true;
 
     // iterate the search until we searched all the reachable objects
     while (!queue.empty()) {
@@ -4079,14 +4081,16 @@ Executor::getReachableMemoryObjects(ExecutionState &state) {
               }
           } else {
               klee_warning("Failed resolving segment in memcleanup check");
+              retval = false;
           }
         } else {
           klee_warning("Cannot resolve non-constant segment in memcleanup check");
+          retval = false;
         }
       }
     }
 
-    return reachable;
+    return retval;
 }
 
 void Executor::terminateStateOnExit(ExecutionState &state) {
@@ -4108,13 +4112,19 @@ void Executor::terminateStateOnExit(ExecutionState &state) {
 
       klee_warning("Found unfreed memory, checking if it still can be freed.");
 
-      auto reach = getReachableMemoryObjects(state);
+      std::set<const MemoryObject*> reachable;
+      bool success = getReachableMemoryObjects(state, reachable);
       for (auto *leak : leaks) {
-        if (reach.count(leak) == 0) {
-          std::string info = getKValueInfo(state, leak->getPointer());
-          terminateStateOnProgramError(state, "memory error: memory leak detected",
-                                       StateTerminationType::Leak, info);
-          return;
+        if (reachable.count(leak) == 0) {
+          if (success) {
+            std::string info = getKValueInfo(state, leak->getPointer());
+            terminateStateOnProgramError(state, "memory error: memory leak detected",
+                                         StateTerminationType::Leak, info);
+            return;
+          } else {
+            terminateStateOnExecError(state, "Possible leak detected, but failed confirming it");
+            return;
+          }
         }
       }
 
