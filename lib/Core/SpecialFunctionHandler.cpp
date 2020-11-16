@@ -82,6 +82,7 @@ static constexpr std::array handlerInfo = {
   addDNR("__assert", handleAssertFail),
   addDNR("_assert", handleAssert),
   addDNR("abort", handleAbort),
+  addDNR("_Exit", handleExit),
   addDNR("_exit", handleExit),
   addDNR("_Exit", handleExit),
   SpecialFunctionHandler::HandlerInfo{ "exit", &SpecialFunctionHandler::handleExit, true, false, true },
