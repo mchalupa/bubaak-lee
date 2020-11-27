@@ -70,6 +70,8 @@ public:
   bool markMappingsAsUnneeded();
   ArrayCache *getArrayCache() const { return arrayCache; }
 
+  uint64_t getLastSegment() const { return lastSegment; }
+
   /*
    * Returns the size used by deterministic allocation in bytes
    */
