@@ -107,6 +107,11 @@ namespace {
             cl::desc("Write .xml files in the TEST-COMP format (default=false)"),
             cl::cat(TestCaseCat));
 
+  cl::opt<std::string>
+  TestCasesSuffix("testcases-suffix",
+            cl::desc("Add a suffix to the .xml testcases name"),
+            cl::cat(TestCaseCat));
+
   cl::opt<bool>
   WriteWitness("write-witness",
             cl::desc("Write .graphml files in the SV-COMP format (default=false)"),
@@ -710,7 +715,8 @@ void KleeHandler::processTestCase(const ExecutionState &state,
     }
 
     if (WriteTestCases) {
-      if (auto f = openTestFile("xml", test_id)) {
+      if (auto f = openTestFile(TestCasesSuffix.empty() ?
+                                "xml" : TestCasesSuffix+".xml", test_id)) {
         // write the header
         *f <<
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
