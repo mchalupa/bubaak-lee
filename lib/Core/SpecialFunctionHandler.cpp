@@ -182,8 +182,8 @@ static constexpr std::array handlerInfo = {
   // operator new(unsigned long)
   add("_Znwm", handleNew, true),
 
-  add("pthread_create", handlePthreadCreate, false),
-  add("pthread_join", handlePthreadJoin, false),
+  add("pthread_create", handlePthreadCreate, true),
+  add("pthread_join", handlePthreadJoin, true),
 
 #undef addDNR
 #undef add
