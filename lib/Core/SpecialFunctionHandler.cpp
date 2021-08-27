@@ -183,6 +183,7 @@ static constexpr std::array handlerInfo = {
   add("_Znwm", handleNew, true),
 
   add("pthread_create", handlePthreadCreate, false),
+  add("pthread_join", handlePthreadJoin, false),
 
 #undef addDNR
 #undef add
@@ -1283,3 +1284,9 @@ void SpecialFunctionHandler::handlePthreadCreate(ExecutionState &state,
         "Call to pthread_create.");
 }
 
+void SpecialFunctionHandler::handlePthreadJoin(ExecutionState &state,
+                                               KInstruction *target,
+                                               const std::vector<Cell> &arguments) {
+  executor.terminateStateOnExecError(state,
+        "Call to pthread_join.");
+}
