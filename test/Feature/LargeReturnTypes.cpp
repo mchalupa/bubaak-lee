@@ -1,3 +1,8 @@
+// XFAIL: *
+// We do not fully support calling external functions
+// with our symbolic memory. This test does exactly that.
+// REQUIRES: not-msan
+// Requires instrumented C++ library for msan
 // REQUIRES: not-darwin
 // REQUIRES: not-freebsd
 // RUN: %clangxx -g -fno-exceptions -emit-llvm %O0opt -c -o %t.bc %s
