@@ -4088,6 +4088,9 @@ Executor::getReachableMemoryObjects(ExecutionState &state,
                   queue.insert(result);
               }
           } else {
+              if (state.addressSpace.removedObjectsMap.count(segval) > 0)
+                  continue; // this memory object has been freed
+
               klee_warning("Failed resolving segment in memcleanup check");
               retval = false;
           }
