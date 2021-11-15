@@ -1251,6 +1251,9 @@ static const char *modelledExternals[] = {
   "__VERIFIER_assume",
   "pthread_create",
   "pthread_join",
+  "pthread_key_create",
+  "pthread_set_specific",
+  "pthread_get_specific",
 };
 
 // Symbols we aren't going to warn about
