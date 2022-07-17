@@ -4319,7 +4319,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
                    optimizer.optimizeExpr(address.getOffset(), true));
 
   ObjectPair op;
-  bool success;
+  bool success = false;
   solver->setTimeout(coreSolverTimeout);
   if (!state.addressSpace.resolveOne(state, solver.get(), address, op, success)) {
     address = KValue(toConstant(state, address.getSegment(), "resolveOne failure"),
