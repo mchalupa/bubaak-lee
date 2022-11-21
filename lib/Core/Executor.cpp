@@ -4481,7 +4481,8 @@ static std::set<std::string> okExternals(okExternalsList,
 static std::set<std::string> nokExternals({"fesetround", "fesetenv",
                                            "feenableexcept", "fedisableexcept",
                                            "feupdateenv", "fesetexceptflag",
-                                           "feclearexcept", "feraiseexcept"});
+                                           "feclearexcept", "feraiseexcept",
+                                           "gettext"});
 
 void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
                                     KCallable *callable,
@@ -4494,7 +4495,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
   if (ExternalCalls == ExternalCallPolicy::Pure &&
       nokExternals.count(callable->getName().str()) > 0) {
-    terminateStateOnUserError(state, "failed external call");
+    terminateStateOnError(state, "failed external call: " + callable->getName(),
+                          StateTerminationType::External);
     return;
   }
 
