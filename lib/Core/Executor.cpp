@@ -4514,15 +4514,21 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   if (ExternalCalls == ExternalCallPolicy::Pure &&
       !okExternals.count(callable->getName().str())) {
     auto *kfunc = dyn_cast<KFunction>(callable);
-    if (!kfunc) return;
+    if (!kfunc) { // this can be an ASM
+      klee_warning_once(target, "Skipping call of undefined function: %s",
+                        callable->getName().str().c_str());
+      return;
+    }
     auto *retTy = kfunc->function->getReturnType();
     if (retTy->isVoidTy()) {
-        //klee_warning_once(target, "Skipping call of undefined function: %s",
-        //                  function->getName().str().c_str());
+        // we assume that the function is pure, so it is safe to skip it
+        // since it does not return a value
         return;
     }
 
     // the function returns something
+    assert(kfunc);
+    assert(!retTy->isVoidTy());
 
     DataLayout& DL = *kmodule->targetData;
     auto size = DL.getTypeAllocSizeInBits(retTy);
