@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <string>
+#include <cstdint>
 
 namespace klee {
   class Statistic;
