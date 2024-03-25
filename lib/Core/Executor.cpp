@@ -5688,7 +5688,11 @@ size_t Executor::getAllocationAlignment(const llvm::Value *allocSite) const {
   // FIXME: 8 was the previous default. We shouldn't hard code this
   // and should fetch the default from elsewhere.
   const size_t forcedAlignment = 8;
+#if LLVM_VERSION_MAJOR <= 14
   size_t alignment = 0;
+#else
+  llvm::Align alignment = 0;
+#endif
   llvm::Type *type = NULL;
   std::string allocationSiteName(allocSite->getName().str());
   if (const GlobalObject *GO = dyn_cast<GlobalObject>(allocSite)) {
