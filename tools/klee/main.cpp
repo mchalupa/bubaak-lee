@@ -392,6 +392,8 @@ public:
 
   void setInterpreter(Interpreter *i);
 
+  std::string dumpPath(const ExecutionState& state);
+
   void processTestCase(const ExecutionState  &state,
                        const char *errorMessage,
                        const char *errorSuffix);
@@ -532,10 +534,9 @@ std::string KleeHandler::getOutputFilename(const std::string &filename) {
   return path.c_str();
 }
 
-std::unique_ptr<llvm::raw_fd_ostream>
-KleeHandler::openOutputFile(const std::string &filename) {
+static std::unique_ptr<llvm::raw_fd_ostream>
+openFileForPath(const std::string &path) {
   std::string Error;
-  std::string path = getOutputFilename(filename);
   auto f = klee_open_output_file(path, Error);
   if (!f) {
     klee_warning("error opening file \"%s\".  KLEE may have run out of file "
@@ -546,6 +547,13 @@ KleeHandler::openOutputFile(const std::string &filename) {
   }
   return f;
 }
+
+
+std::unique_ptr<llvm::raw_fd_ostream>
+KleeHandler::openOutputFile(const std::string &filename) {
+  return openFileForPath(getOutputFilename(filename));
+}
+
 
 std::string KleeHandler::getTestFilename(const std::string &suffix, unsigned id) {
   std::stringstream filename;
@@ -708,6 +716,32 @@ static std::string getDecl(const std::string& fun, unsigned bitwidth,
   }
   return rettype + fun + "(" + args + ")";
 }
+
+std::string KleeHandler::dumpPath(const ExecutionState& state) {
+  if (!m_pathWriter) {
+    m_pathWriter = new TreeStreamWriter(getOutputFilename("paths.ts"));
+    assert(m_pathWriter->good());
+    m_interpreter->setPathWriter(m_pathWriter);
+  }
+
+  assert(m_pathWriter);
+
+  static unsigned num = 0;
+  std::vector<unsigned char> concreteBranches;
+  m_pathWriter->readStream(m_interpreter->getPathStreamID(state),
+                           concreteBranches);
+
+  std::string path = getOutputFilename("path-1" + std::to_string(num) + ".path");
+  auto f = openFileForPath(path);
+  if (f) {
+    for (const auto &branch : concreteBranches) {
+      *f << branch << '\n';
+    }
+  }
+
+  return path;
+}
+
 
 /* Outputs all files (.ktest, .kquery, .cov etc.) describing a test case */
 void KleeHandler::processTestCase(const ExecutionState &state,
