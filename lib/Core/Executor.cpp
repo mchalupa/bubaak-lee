@@ -1421,6 +1421,10 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
   else
     klee_warning_once(reason.c_str(), "%s", os.str().c_str());
 
+
+  const auto& pathfile = interpreterHandler->dumpPath(state);
+  klee_warning("Dumped unfinished path to file: %s", pathfile.c_str());
+
   if (concretize)
     addConstraint(state, EqExpr::create(e, cvalue));
 
