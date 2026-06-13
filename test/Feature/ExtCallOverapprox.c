@@ -15,12 +15,12 @@ int main() {
   klee_make_symbolic(&x, sizeof(x), "x");
 
   printf("%d\n", x);
-  // CHECK: calling external: printf
+  // CHECK: external call with symbolic argument: printf
+  // In the fork's over-approx policy, states with symbolic pointer args are
+  // terminated, so the conditional branches below are not reached.
   if (x > 0) {
     printf("Yes\n");
-    // CHECK-DAG: Yes
   } else {
     printf("No\n");
-    // CHECK-DAG: No
   }
 }

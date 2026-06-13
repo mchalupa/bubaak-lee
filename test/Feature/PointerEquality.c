@@ -2,6 +2,7 @@
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out %t1.bc 2>&1 | FileCheck %s
 
+#include "klee/klee.h"
 #include <stdlib.h>
 #include <assert.h>
 

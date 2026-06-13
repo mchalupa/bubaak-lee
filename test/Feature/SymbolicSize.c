@@ -3,6 +3,7 @@
 // RUN: %klee --output-dir=%t.klee-out --exit-on-error %t1.bc
 
 
+#include "klee/klee.h"
 #include <assert.h>
 
 int main() {

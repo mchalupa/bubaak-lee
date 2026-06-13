@@ -6,13 +6,14 @@
 // write into addresses 0x80(128) and 0x84(132), but fails on 0x88(136)
 // This is an extension of DefineFixedObject.c test
 
+#include "klee/klee.h"
 #include <stdio.h>
 #include <assert.h>
 
 #define ADDRESS ((int*) 0x0080)
 
 int main() {
-	klee_define_fixed_object(0x100UL, 20);
+	klee_define_fixed_object((void*)0x100UL, 20);
 	*(((int*) 0x100) + 2) = 3;
 	int *p = (int*)0x108;
 	assert(*p == 3);

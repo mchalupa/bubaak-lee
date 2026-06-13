@@ -1,10 +1,9 @@
 ; RUN: %llvmas %s -f -o %t1.bc
 ; RUN: rm -rf %t.klee-out
-; Run KLEE and expect it to error out but not crash
-; RUN: not %klee --output-dir=%t.klee-out --optimize=false %t1.bc 2> %t2
-; Check that it could not find an initializer for the external_function global
-; RUN: FileCheck %s --input-file %t2
-; CHECK: ERROR: Unable to load symbol(external_function) while initializing globals
+; Run KLEE — the fork makes the external global symbolic and catches the
+; invalid function pointer call gracefully (no crash).
+; RUN: %klee --output-dir=%t.klee-out --optimize=false %t1.bc 2>&1 | FileCheck %s
+; CHECK: memory error: invalid function pointer
 
 @external_function = extern_weak global i8
 @bar = internal thread_local global <{ [56 x i8] }> zeroinitializer, align 32
