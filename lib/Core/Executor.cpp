@@ -4584,10 +4584,12 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
     uint64_t address = 0;
     if (ExternalCalls == ExternalCallPolicy::All) { // don't bother checking uniqueness
       auto value = optimizer.optimizeExpr(ai->getValue(), true);
-      ref<ConstantExpr> ce;
-      bool success =
-          solver->getValue(state.constraints, value, ce, state.queryMetaData);
-      assert(success && "FIXME: Unhandled solver failure");
+      ref<ConstantExpr> ce = getValueFromSeeds(state, value);
+      bool success = true;
+      if (!ce) {
+        success = solver->getValue(state.constraints, value, ce, state.queryMetaData);
+        assert(success && "FIXME: Unhandled solver failure");
+      }
       ce->toMemory(&args[wordIndex]);
       ObjectPair op;
       // Checking to see if the argument is a pointer to something
@@ -4848,6 +4850,14 @@ Executor::executeAlloc(ExecutionState &state,
                        const ObjectState *reallocFrom,
                        size_t allocationAlignment) {
   size = optimizer.optimizeExpr(size, true);
+  // In seed mode, concretize a symbolic size to the seed value so that
+  // subsequent branch conditions on the size are resolved by the seed.
+  if (!isa<ConstantExpr>(size)) {
+    if (ref<ConstantExpr> seedSize = getValueFromSeeds(state, size)) {
+      addConstraint(state, EqExpr::create(size, seedSize));
+      size = seedSize;
+    }
+  }
   const llvm::Value *allocSite = state.prevPC->inst;
   if (allocationAlignment == 0) {
     allocationAlignment = getAllocationAlignment(allocSite);
@@ -5335,7 +5345,7 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
             std::vector<unsigned char> &values = si.assignment.bindings[array];
             values.insert(values.begin(), obj->bytes,
                           obj->bytes + std::min(obj->numBytes, size));
-            if (ZeroSeedExtension) {
+            if (ZeroSeedExtension || AllowSeedExtension) {
               for (unsigned i=obj->numBytes; i<size; ++i)
                 values.push_back('\0');
             }

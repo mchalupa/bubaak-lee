@@ -24,5 +24,7 @@ int main() {
   klee_make_symbolic(&x, sizeof(x), "x");
   assert(abs(x) == 12345678);
 
-  // CHECK-STATS: 1
+  // CHECK-STATS: 0
+  // Seed value (12345678) is used directly for the external call argument —
+  // no solver query needed since the seed assignment resolves it to a constant.
 }
