@@ -1423,7 +1423,8 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
 
 
   const auto& pathfile = interpreterHandler->dumpPath(state);
-  klee_warning("Dumped unfinished path to file: %s", pathfile.c_str());
+  if (!pathfile.empty())
+    klee_warning("Dumped unfinished path to file: %s", pathfile.c_str());
 
   if (concretize)
     addConstraint(state, EqExpr::create(e, cvalue));
@@ -2724,8 +2725,14 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         break;
       }
       // We handle constant segments for now
-      assert((cast<ConstantExpr>(pointer.getSegment())->getZExtValue()
-                == FUNCTIONS_SEGMENT) && "Invalid function pointer");
+      if (auto *segCE = dyn_cast<ConstantExpr>(pointer.getSegment())) {
+        if (segCE->getZExtValue() != FUNCTIONS_SEGMENT) {
+          terminateStateOnProgramError(state, "memory error: invalid function pointer",
+                                       StateTerminationType::Ptr,
+                                       getKValueInfo(state, pointer));
+          break;
+        }
+      }
       ref<Expr> v = optimizer.optimizeExpr(pointer.getValue(), true);
 
       ExecutionState *free = &state;
@@ -4609,10 +4616,12 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
                                       callable->getName());
             return;
           }
+          if (!op.second->readOnly) {
+            auto *os = state.addressSpace.getWriteable(op.first, op.second);
+            os->flushToConcreteStore(*this, state,
+                                     ExternalCalls == ExternalCallPolicy::All);
+          }
         }
-        auto *os = state.addressSpace.getWriteable(op.first, op.second);
-        os->flushToConcreteStore(*this, state,
-                                 ExternalCalls == ExternalCallPolicy::All);
       }
 
       wordIndex += (ce->getWidth() + 63) / 64;
@@ -4935,6 +4944,23 @@ void Executor::resolveExact(ExecutionState &state,
   }
 
   if (unbound) {
+    // Check if the segment is known to be freed (double free / invalid access)
+    if (auto segCE = dyn_cast<ConstantExpr>(addressOptim.getSegment())) {
+      uint64_t seg = segCE->getZExtValue();
+      if (seg >= FIRST_ORDINARY_SEGMENT &&
+          unbound->addressSpace.removedObjectsMap.count(seg)) {
+        if (name == "free") {
+          terminateStateOnProgramError(*unbound, "memory error: double free",
+                                       StateTerminationType::Ptr,
+                                       getKValueInfo(*unbound, addressOptim));
+        } else {
+          terminateStateOnProgramError(*unbound, "memory error: use after free",
+                                       StateTerminationType::Ptr,
+                                       getKValueInfo(*unbound, addressOptim));
+        }
+        return;
+      }
+    }
     auto CE = dyn_cast<ConstantExpr>(addressOptim.getOffset());
     if (MemoryManager::isDeterministic && CE) {
       using kdalloc::LocationInfo;
@@ -5153,7 +5179,26 @@ void Executor::executeMemoryOperation(ExecutionState &state,
     if (incomplete) {
       terminateStateOnSolverError(*unbound, "Query timed out (resolve).");
     } else {
-      if (auto CE = dyn_cast<ConstantExpr>(address.getOffset())) {
+      // In the segment-based memory model, a non-zero segment identifies the
+      // allocation. If that segment is in removedObjectsMap, this is a
+      // use-after-free; if it's simply not in segmentMap, it's out of bounds.
+      if (auto segCE = dyn_cast<ConstantExpr>(addressOptim.getSegment())) {
+        uint64_t seg = segCE->getZExtValue();
+        if (seg >= FIRST_ORDINARY_SEGMENT) {
+          if (unbound->addressSpace.removedObjectsMap.count(seg)) {
+            terminateStateOnProgramError(
+                *unbound, "memory error: use after free",
+                StateTerminationType::Ptr, getKValueInfo(*unbound, addressOptim));
+          } else {
+            terminateStateOnProgramError(
+                *unbound, "memory error: out of bound pointer",
+                StateTerminationType::Ptr, getKValueInfo(*unbound, addressOptim));
+          }
+          return;
+        }
+      }
+      // Flat-address (segment == 0) pointer: apply null-page and kdalloc checks.
+      if (auto CE = dyn_cast<ConstantExpr>(addressOptim.getOffset())) {
         std::uintptr_t ptrval = CE->getZExtValue();
         auto ptr = reinterpret_cast<void *>(ptrval);
         if (ptrval < MemoryManager::pageSize) {
@@ -5692,11 +5737,7 @@ size_t Executor::getAllocationAlignment(const llvm::Value *allocSite) const {
   // FIXME: 8 was the previous default. We shouldn't hard code this
   // and should fetch the default from elsewhere.
   const size_t forcedAlignment = 8;
-#if LLVM_VERSION_MAJOR <= 14
   size_t alignment = 0;
-#else
-  llvm::Align alignment = 0;
-#endif
   llvm::Type *type = NULL;
   std::string allocationSiteName(allocSite->getName().str());
   if (const GlobalObject *GO = dyn_cast<GlobalObject>(allocSite)) {

@@ -80,8 +80,7 @@ void MemoryObject::initializeSymbolicArray(klee::ArrayCache &array) {
     auto tmparray = array.CreateArray(std::string("mo_addr_for_seg:") +
                                         std::to_string(segment),
                                       Context::get().getPointerWidth());
-    symbolicAddress = Expr::createTempRead(tmparray,
-                                           Context::get().getPointerWidth());
+    symbolicAddress = tmparray;
   }
 }
 

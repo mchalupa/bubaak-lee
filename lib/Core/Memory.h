@@ -56,7 +56,7 @@ public:
 
   /// size in bytes
   ref<Expr> size;
-  size_t alignment;
+  size_t alignment = 0;
   // size of real virtual process memory allocated
   // for this object (this memory may be passed to external calls).
   uint64_t allocatedSize = 0;
