@@ -22,6 +22,7 @@
 
 DISABLE_WARNING_PUSH
 DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -72,7 +73,18 @@ struct NewPMRunner {
   CGSCCAnalysisManager CGAM;
   ModuleAnalysisManager MAM;
 
-  NewPMRunner() {
+  NewPMRunner(llvm::Module &M) {
+    // Prevent the optimizer from synthesising library calls that KLEE's
+    // freestanding runtime does not provide. In particular the pipeline would
+    // otherwise turn "memcmp(...) == 0" into bcmp, which is then introduced
+    // after the (lazily linked) runtime has been linked and ends up as an
+    // unresolved external call. Registering a TargetLibraryAnalysis with bcmp
+    // marked unavailable must happen before registerFunctionAnalyses so it
+    // takes precedence over the default one.
+    llvm::TargetLibraryInfoImpl TLII(llvm::Triple(M.getTargetTriple()));
+    TLII.setUnavailable(llvm::LibFunc_bcmp);
+    FAM.registerPass([TLII] { return llvm::TargetLibraryAnalysis(TLII); });
+
     PB.registerModuleAnalyses(MAM);
     PB.registerCGSCCAnalyses(CGAM);
     PB.registerFunctionAnalyses(FAM);
@@ -86,7 +98,7 @@ struct NewPMRunner {
 
 void klee::optimizeModule(llvm::Module *M,
                           llvm::ArrayRef<const char *> preservedFunctions) {
-  NewPMRunner runner;
+  NewPMRunner runner(*M);
   ModulePassManager MPM;
 
   // Mark all symbols other than the preserved ones as internal so that the
@@ -138,7 +150,7 @@ void klee::optimiseAndPrepare(bool OptimiseKLEECall, bool Optimize,
   // interpretation.  CFG simplification and (optionally) the LLVM switch
   // lowering are built-in passes run through the new PassManager.
   {
-    NewPMRunner runner;
+    NewPMRunner runner(*module);
     FunctionPassManager FPM;
     FPM.addPass(SimplifyCFGPass());
     if (SwitchType == SwitchImplType::eSwitchTypeLLVM)
@@ -164,7 +176,7 @@ void klee::optimiseAndPrepare(bool OptimiseKLEECall, bool Optimize,
 
   // Scalarizer is a built-in transform (new PassManager).
   {
-    NewPMRunner runner;
+    NewPMRunner runner(*module);
     FunctionPassManager FPM;
     FPM.addPass(ScalarizerPass());
 
