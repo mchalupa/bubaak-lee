@@ -2,7 +2,14 @@
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out --klee-call-optimisation=false %t.bc 2>&1 | FileCheck %s
 // RUN: rm -rf %t.klee-out
-// RUN: %klee --output-dir=%t.klee-out --klee-call-optimisation=false --optimize %t.bc 2>&1 | FileCheck %s
+// RUN: %klee --output-dir=%t.klee-out --klee-call-optimisation=false --optimize %t.bc 2>&1 | FileCheck --check-prefix=CHECK-OPT %s
+//
+// With --optimize the optimizer reshapes the CFG, so the exact path counts and
+// the source line attributed to the division differ from the unoptimized run
+// (and across LLVM versions / pass managers). For the optimized run only check
+// that both errors are still detected.
+// CHECK-OPT-DAG: divide by zero
+// CHECK-OPT-DAG: ASSERTION FAIL
 #include "klee/klee.h"
 #include <assert.h>
 
