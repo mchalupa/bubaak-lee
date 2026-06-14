@@ -4824,7 +4824,7 @@ ref<Expr> Executor::replaceReadWithSymbolic(ExecutionState &state,
   return res;
 }
 
-ObjectState *Executor::bindObjectInState(ExecutionState &state, 
+ObjectState *Executor::bindObjectInState(ExecutionState &state,
                                          const MemoryObject *mo,
                                          bool isLocal,
                                          const Array *array) {
@@ -5114,10 +5114,34 @@ void Executor::executeMemoryOperation(ExecutionState &state,
             terminateStateOnProgramError(state, "memory error: object read only",
                                          StateTerminationType::ReadOnly);
           } else {
+            if (!isa<ConstantExpr>(offset)) {
+              if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
+                if (CE->getZExtValue() > UINT32_MAX) {
+                  terminateStateOnExecError(
+                      state, "Symbolic writes to objects larger than 4 GiB are "
+                             "not allowed (object size: " +
+                                 llvm::utostr(CE->getZExtValue()) + " bytes).");
+                  return;
+                }
+              }
+            }
             ObjectState *wos = state.addressSpace.getWriteable(mo, os);
             wos->write(offset, value);
           }
         } else {
+          // Reject symbolic reads from objects larger than 4 GiB: the internal
+          // representation uses 32-bit offsets and cannot represent them.
+          if (!isa<ConstantExpr>(offset)) {
+            if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
+              if (CE->getZExtValue() > UINT32_MAX) {
+                terminateStateOnExecError(
+                    state, "Symbolic reads from objects larger than 4 GiB are "
+                           "not allowed (object size: " +
+                               llvm::utostr(CE->getZExtValue()) + " bytes).");
+                return;
+              }
+            }
+          }
           KValue result = os->read(offset, type);
 
           if (interpreterOpts.MakeConcreteSymbolic) {
@@ -5169,12 +5193,38 @@ void Executor::executeMemoryOperation(ExecutionState &state,
           terminateStateOnProgramError(*bound, "memory error: object read only",
                                        StateTerminationType::ReadOnly);
         } else {
+          ref<Expr> writeOffset = addressOptim.getOffset();
+          if (!isa<ConstantExpr>(writeOffset)) {
+            if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
+              if (CE->getZExtValue() > UINT32_MAX) {
+                terminateStateOnExecError(
+                    *bound, "Symbolic writes to objects larger than 4 GiB are "
+                            "not allowed (object size: " +
+                                llvm::utostr(CE->getZExtValue()) + " bytes).");
+                unbound = branches.second;
+                continue;
+              }
+            }
+          }
           ObjectState *wos = bound->addressSpace.getWriteable(mo, os);
           // TODO segment
-          wos->write(addressOptim.getOffset(), value);
+          wos->write(writeOffset, value);
         }
       } else {
-        KValue result = os->read(addressOptim.getOffset(), type);
+        ref<Expr> readOffset = addressOptim.getOffset();
+        if (!isa<ConstantExpr>(readOffset)) {
+          if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
+            if (CE->getZExtValue() > UINT32_MAX) {
+              terminateStateOnExecError(
+                  *bound, "Symbolic reads from objects larger than 4 GiB are "
+                          "not allowed (object size: " +
+                              llvm::utostr(CE->getZExtValue()) + " bytes).");
+              unbound = branches.second;
+              continue;
+            }
+          }
+        }
+        KValue result = os->read(readOffset, type);
         bindLocal(target, *bound, result);
       }
     }
@@ -5289,7 +5339,7 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
   // Create a new object state for the memory object (instead of a copy).
   if (!replayKTest) {
     // TODO fix seeding for symbolic sizes
-    unsigned size = 0;
+    uint64_t size = 0;
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
       size = CE->getZExtValue();
     }
@@ -5344,9 +5394,9 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
             /* Either sizes are equal or seed extension/trucation is allowed */
             std::vector<unsigned char> &values = si.assignment.bindings[array];
             values.insert(values.begin(), obj->bytes,
-                          obj->bytes + std::min(obj->numBytes, size));
+                          obj->bytes + std::min((uint64_t)obj->numBytes, size));
             if (ZeroSeedExtension || AllowSeedExtension) {
-              for (unsigned i=obj->numBytes; i<size; ++i)
+              for (uint64_t i=obj->numBytes; i<size; ++i)
                 values.push_back('\0');
             }
           }
