@@ -5,9 +5,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+// abs() is lowered to the llvm.abs intrinsic by recent clang (so it is no
+// longer an external call), and library functions such as printf are on KLEE's
+// allow-list even under --external-calls=none. Use a genuinely external,
+// non-allow-listed function to check that external calls are disallowed.
+int external_function(int);
+
 int main(int argc, char** argv) {
-  // CHECK: Disallowed call to external function: abs
-  int x = abs(argc);
-  printf("%d\n", argc);
+  // CHECK: Disallowed call to external function: external_function
+  int x = external_function(argc);
+  printf("%d\n", x);
   return 0;
 }
