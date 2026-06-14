@@ -1,3 +1,10 @@
+// Starting with LLVM/clang 22, the pointer-overflow sanitizer no longer
+// instruments applying a (constant) zero offset to a pointer, since "p + 0" is
+// well-defined. With no instrumentation there is nothing for KLEE to detect,
+// so restrict this test to older clang. KLEE's ubsan handling itself is still
+// covered by the nonzero-offset pointer_overflow tests.
+// REQUIRES: lt-llvm-22.0
+
 // RUN: %clang %s -fsanitize=pointer-overflow -emit-llvm -g %O0opt -c -o %t.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out --emit-all-errors --ubsan-runtime %t.bc 2>&1 | FileCheck %s
