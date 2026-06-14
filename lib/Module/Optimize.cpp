@@ -64,6 +64,19 @@ cl::opt<bool>
                cl::desc("Strip debugger symbol info from executable"),
                cl::init(false), cl::cat(klee::ModuleCat));
 
+// KLEE interprets the bitcode and scalarizes vector operations, so vectorization
+// is counter-productive: it produces vector instructions and, for the loop
+// vectorizer, runtime memory-overlap checks that compute the difference of two
+// (possibly cross-object) pointers. The segment-based memory model cannot
+// represent such a cross-object pointer difference, which manifests as a bogus
+// segment. The hand-built legacy pipeline never vectorized either, so disable it.
+static llvm::PipelineTuningOptions kleePipelineTuningOptions() {
+  llvm::PipelineTuningOptions PTO;
+  PTO.LoopVectorization = false;
+  PTO.SLPVectorization = false;
+  return PTO;
+}
+
 // Helper that wires up the analysis managers required by the new PassManager
 // and runs the given module pass manager over the module.
 struct NewPMRunner {
@@ -73,7 +86,7 @@ struct NewPMRunner {
   CGSCCAnalysisManager CGAM;
   ModuleAnalysisManager MAM;
 
-  NewPMRunner(llvm::Module &M) {
+  NewPMRunner(llvm::Module &M) : PB(nullptr, kleePipelineTuningOptions()) {
     // Prevent the optimizer from synthesising library calls that KLEE's
     // freestanding runtime does not provide. In particular the pipeline would
     // otherwise turn "memcmp(...) == 0" into bcmp, which is then introduced
