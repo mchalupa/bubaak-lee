@@ -164,6 +164,25 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
         break;
       }
 
+#if LLVM_VERSION_CODE >= LLVM_VERSION(12, 0)
+      case Intrinsic::ptrmask: {
+        // llvm.ptrmask(ptr, mask) -> inttoptr(and(ptrtoint(ptr), mask)).
+        // Recent clang uses this intrinsic for pointer alignment (e.g. for
+        // 16-byte aligned variadic arguments) where it previously emitted the
+        // equivalent ptrtoint/and/inttoptr sequence directly.
+        IRBuilder<> Builder(ii);
+        Value *ptr = ii->getArgOperand(0);
+        Value *mask = ii->getArgOperand(1);
+        Value *intPtr = Builder.CreatePtrToInt(ptr, mask->getType());
+        Value *masked = Builder.CreateAnd(intPtr, mask);
+        Value *result = Builder.CreateIntToPtr(masked, ii->getType());
+        ii->replaceAllUsesWith(result);
+        ii->eraseFromParent();
+        dirty = true;
+        break;
+      }
+#endif
+
       case Intrinsic::sadd_with_overflow:
       case Intrinsic::ssub_with_overflow:
       case Intrinsic::smul_with_overflow:
