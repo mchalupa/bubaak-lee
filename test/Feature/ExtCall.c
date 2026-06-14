@@ -19,7 +19,11 @@ int main() {
 
   int y = abs(x);
   printf("y = %d\n", y);
-  // CHECK: calling external: abs(value/address: (ReadLSB w32 0 x))
+  // abs() is lowered to the llvm.abs intrinsic by recent clang, so the
+  // remaining external call is printf, whose symbolic argument (y, derived
+  // from x) is concretized. The fork prints external-call arguments using its
+  // segment-based memory model: name(segment: N, value/address: ...).
+  // CHECK: calling external: printf(segment: {{[0-9]+}}, value/address:
 
   assert(x == y);
 }
