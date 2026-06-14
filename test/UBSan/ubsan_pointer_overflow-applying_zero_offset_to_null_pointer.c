@@ -3,7 +3,7 @@
 // well-defined. With no instrumentation there is nothing for KLEE to detect,
 // so restrict this test to older clang. KLEE's ubsan handling itself is still
 // covered by the nonzero-offset pointer_overflow tests.
-// REQUIRES: lt-llvm-22.0
+// REQUIRES: lt-llvm-22.1
 
 // RUN: %clang %s -fsanitize=pointer-overflow -emit-llvm -g %O0opt -c -o %t.bc
 // RUN: rm -rf %t.klee-out
