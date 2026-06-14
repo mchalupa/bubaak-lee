@@ -18,7 +18,10 @@
 #include "klee/System/Time.h"
 #include "klee/Module/KValue.h"
 
+#include "klee/Config/Version.h"
+#if LLVM_VERSION_CODE < LLVM_VERSION(16, 0)
 #include "llvm/ADT/Optional.h"
+#endif
 
 namespace klee {
   class ExecutionState;

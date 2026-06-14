@@ -16,7 +16,10 @@
 #include "klee/ADT/BitArray.h"
 #include "klee/Module/KValue.h"
 
+#include "klee/Config/Version.h"
+#if LLVM_VERSION_CODE < LLVM_VERSION(16, 0)
 #include "llvm/ADT/Optional.h"
+#endif
 #include "llvm/ADT/StringExtras.h"
 
 #include <optional>

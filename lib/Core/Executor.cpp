@@ -1534,8 +1534,17 @@ void Executor::executeLifetimeIntrinsic(ExecutionState &state,
                                         KInstruction *ki,
                                         const std::vector<Cell> &arguments,
                                         bool isEnd) {
-  llvm::Instruction *mem
-    = llvm::dyn_cast<Instruction>(ki->inst->getOperand(1)->stripPointerCasts());
+  // The lifetime intrinsics take the marked pointer as their last argument.
+  // Prior to LLVM 22 the signature was (i64 size, ptr), so the pointer was
+  // argument 1; in LLVM 22 the size argument was removed, making it argument 0.
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+  const unsigned ptrArgIdx = 0;
+#else
+  const unsigned ptrArgIdx = 1;
+#endif
+
+  llvm::Instruction *mem = llvm::dyn_cast<Instruction>(
+      ki->inst->getOperand(ptrArgIdx)->stripPointerCasts());
 
   if (!mem) {
     terminateStateOnExecError(state,
@@ -1551,7 +1560,7 @@ void Executor::executeLifetimeIntrinsic(ExecutionState &state,
     return;
   }
 
-  executeLifetimeIntrinsic(state, ki, kinstMem, arguments[1], isEnd);
+  executeLifetimeIntrinsic(state, ki, kinstMem, arguments[ptrArgIdx], isEnd);
 }
 
 void Executor::executeLifetimeIntrinsic(ExecutionState &state,
@@ -1836,7 +1845,7 @@ ref<klee::ConstantExpr> Executor::getEhTypeidFor(ref<Expr> type_info) {
 }
 
 static inline bool isErrorCall(const llvm::StringRef& name) {
-  return name.equals(ErrorFun);
+  return name == ErrorFun;
 }
 
 void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
@@ -1846,10 +1855,10 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
     return;
 
   // FIXME: hack!
-  if (f->getName().equals("__INSTR_check_nontermination")) {
+  if (f->getName() == "__INSTR_check_nontermination") {
     state.lastLoopCheck = ki->inst;
     // fall-through
-  } else if (f->getName().equals("__INSTR_fail")) {
+  } else if (f->getName() == "__INSTR_fail") {
     state.lastLoopFail = ki->inst;
     // fall-through
   } else if (isErrorCall(f->getName())) {
@@ -1859,7 +1868,7 @@ void Executor::executeCall(ExecutionState &state, KInstruction *ki, Function *f,
     return;
   }
 
-  if (f->getName().equals("__INSTR_check_nontermination_header")) {
+  if (f->getName() == "__INSTR_check_nontermination_header") {
     state.lastLoopHead = ki->inst;
     state.lastLoopHeadId = state.nondetValues.size();
     return;
@@ -5660,7 +5669,7 @@ Executor::getTestVector(const ExecutionState &state) {
 
     if (seg > 0) {
         auto w = Context::get().getPointerWidth();
-        res.emplace_back(APInt(w, seg), APInt(w, val), it.name);
+        res.emplace_back(makeAPInt64(w, seg), makeAPInt64(w, val), it.name);
     } else {
         res.emplace_back(size, val, it.isSigned, it.name);
     }
@@ -5726,15 +5735,21 @@ size_t Executor::getAllocationAlignment(const llvm::Value *allocSite) const {
   llvm::Type *type = NULL;
   std::string allocationSiteName(allocSite->getName().str());
   if (const GlobalObject *GO = dyn_cast<GlobalObject>(allocSite)) {
-    alignment = GO->getAlignment();
+    // GlobalObject::getAlign() is protected; the alignment must be queried
+    // through the concrete subclass (GlobalVariable / Function).
+    llvm::MaybeAlign goAlign;
     if (const GlobalVariable *globalVar = dyn_cast<GlobalVariable>(GO)) {
+      goAlign = globalVar->getAlign();
       // All GlobalVariables's have pointer type
       assert(globalVar->getType()->isPointerTy() &&
              "globalVar's type is not a pointer");
       type = globalVar->getValueType();
     } else {
+      if (const Function *fn = dyn_cast<Function>(GO))
+        goAlign = fn->getAlign();
       type = GO->getType();
     }
+    alignment = goAlign ? goAlign->value() : 0;
   } else if (const AllocaInst *AI = dyn_cast<AllocaInst>(allocSite)) {
     alignment = AI->getAlign().value();
     type = AI->getAllocatedType();

@@ -18,6 +18,7 @@
 #include "klee/Support/OptionCategories.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/CommandLine.h"
 
@@ -114,11 +115,20 @@ cl::opt<bool> UseAssignmentValidatingSolver(
 
 void KCommandLine::KeepOnlyCategories(
     std::set<llvm::cl::OptionCategory *> const &categories) {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+  DenseMap<StringRef, cl::Option *> &map = cl::getRegisteredOptions();
+#else
   StringMap<cl::Option *> &map = cl::getRegisteredOptions();
+#endif
 
   for (auto &elem : map) {
-    if (elem.first() == "version" || elem.first() == "color" ||
-        elem.first() == "help"    || elem.first() == "help-list")
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+    const StringRef optName = elem.first;
+#else
+    const StringRef optName = elem.first();
+#endif
+    if (optName == "version" || optName == "color" ||
+        optName == "help"    || optName == "help-list")
       continue;
 
     bool keep = false;

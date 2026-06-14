@@ -41,8 +41,13 @@ char RaiseAsmPass::ID = 0;
 
 Function *RaiseAsmPass::getIntrinsic(llvm::Module &M, unsigned IID, Type **Tys,
                                      unsigned NumTys) {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(20, 0)
+  return Intrinsic::getOrInsertDeclaration(
+      &M, (llvm::Intrinsic::ID)IID, llvm::ArrayRef<llvm::Type *>(Tys, NumTys));
+#else
   return Intrinsic::getDeclaration(&M, (llvm::Intrinsic::ID) IID,
                                    llvm::ArrayRef<llvm::Type*>(Tys, NumTys));
+#endif
 }
 
 static bool isnumber(const std::string& str) {
@@ -70,8 +75,12 @@ bool RaiseAsmPass::runOnInstruction(Module &M, Instruction *I) {
   if (!TLI)
     return false;
 
+#if LLVM_VERSION_CODE < LLVM_VERSION(22, 0)
+  // TargetLowering::ExpandInlineAsm was removed in LLVM 22. When it is not
+  // available we simply fall through to the manual handling below.
   if (TLI->ExpandInlineAsm(ci))
     return true;
+#endif
 
   if ((triple.getArch() == llvm::Triple::x86 ||
        triple.getArch() == llvm::Triple::x86_64) &&
@@ -130,6 +139,27 @@ bool RaiseAsmPass::runOnModule(Module &M) {
   std::string Err;
 
   // Use target triple from the module if possible.
+#if LLVM_VERSION_CODE >= LLVM_VERSION(21, 0)
+  // Module::getTargetTriple() returns a llvm::Triple by reference, and the
+  // target-machine / lookup APIs now take a Triple directly.
+  llvm::Triple TargetTriple = M.getTargetTriple();
+  if (TargetTriple.getTriple().empty())
+    TargetTriple = llvm::Triple(llvm::sys::getDefaultTargetTriple());
+  const Target *Target = TargetRegistry::lookupTarget(TargetTriple, Err);
+
+  TargetMachine *TM = 0;
+  if (Target == 0) {
+    klee_warning("Warning: unable to select target: %s", Err.c_str());
+    TLI = 0;
+  } else {
+    TM = Target->createTargetMachine(TargetTriple, "", "", TargetOptions(),
+                                     std::nullopt);
+
+    TLI = TM->getSubtargetImpl(*(M.begin()))->getTargetLowering();
+
+    triple = TargetTriple;
+  }
+#else
   std::string TargetTriple = M.getTargetTriple();
   if (TargetTriple.empty())
     TargetTriple = llvm::sys::getDefaultTargetTriple();
@@ -152,6 +182,7 @@ bool RaiseAsmPass::runOnModule(Module &M) {
 
     triple = llvm::Triple(TargetTriple);
   }
+#endif
 
   for (Module::iterator fi = M.begin(), fe = M.end(); fi != fe; ++fi) {
     for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {

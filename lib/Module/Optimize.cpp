@@ -1,257 +1,183 @@
-// FIXME: This file is a bastard child of opt.cpp and llvm-ld's
-// Optimize.cpp. This stuff should live in common code.
-
-
 //===- Optimize.cpp - Optimize a complete program -------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
+//                     The KLEE Symbolic Virtual Machine
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements all optimization of the linked module for llvm-ld.
+// New-PassManager based implementation of the module optimization and
+// preparation passes used for LLVM >= 17.  The built-in optimization pipeline
+// is built through PassBuilder, while KLEE's own (legacy) passes are still run
+// through a legacy::PassManager.
 //
 //===----------------------------------------------------------------------===//
 
 #include "ModuleHelper.h"
 
-#include "llvm/IR/Module.h"
+#include "Passes.h"
+#include "klee/Support/CompilerWarning.h"
+#include "klee/Support/OptionCategories.h"
 
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Passes/OptimizationLevel.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Transforms/IPO/GlobalDCE.h"
+#include "llvm/Transforms/IPO/Internalize.h"
+#include "llvm/Transforms/IPO/StripSymbols.h"
+#include "llvm/Transforms/Scalar/Scalarizer.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Transforms/Utils/LowerSwitch.h"
+DISABLE_WARNING_POP
+
+#include <set>
+#include <string>
 
 using namespace llvm;
+using namespace klee;
 
-static cl::opt<bool>
+namespace {
+cl::opt<bool>
     DisableInline("disable-inlining",
                   cl::desc("Do not run the inliner pass (default=false)"),
                   cl::init(false), cl::cat(klee::ModuleCat));
 
-static cl::opt<bool> DisableInternalize(
+cl::opt<bool> DisableInternalize(
     "disable-internalize",
     cl::desc("Do not mark all symbols as internal (default=false)"),
     cl::init(false), cl::cat(klee::ModuleCat));
 
-static cl::opt<bool> VerifyEach(
-    "verify-each",
-    cl::desc("Verify intermediate results of all optimization passes (default=false)"),
-    cl::init(false),
-    cl::cat(klee::ModuleCat));
+cl::opt<bool> Strip("strip-all",
+                    cl::desc("Strip all symbol information from executable"),
+                    cl::init(false), cl::cat(klee::ModuleCat));
 
-static cl::alias ExportDynamic("export-dynamic",
-                               cl::aliasopt(DisableInternalize),
-                               cl::desc("Alias for -disable-internalize"));
-
-static cl::opt<bool>
-    Strip("strip-all", cl::desc("Strip all symbol information from executable"),
-          cl::init(false), cl::cat(klee::ModuleCat));
-
-static cl::alias A0("s", cl::desc("Alias for --strip-all"),
-                    cl::aliasopt(Strip));
-
-static cl::opt<bool>
+cl::opt<bool>
     StripDebug("strip-debug",
                cl::desc("Strip debugger symbol info from executable"),
                cl::init(false), cl::cat(klee::ModuleCat));
 
-static cl::alias A1("S", cl::desc("Alias for --strip-debug"),
-                    cl::aliasopt(StripDebug));
+// Helper that wires up the analysis managers required by the new PassManager
+// and runs the given module pass manager over the module.
+struct NewPMRunner {
+  PassBuilder PB;
+  LoopAnalysisManager LAM;
+  FunctionAnalysisManager FAM;
+  CGSCCAnalysisManager CGAM;
+  ModuleAnalysisManager MAM;
 
-// A utility function that adds a pass to the pass manager but will also add
-// a verifier pass after if we're supposed to verify.
-static inline void addPass(legacy::PassManager &PM, Pass *P) {
-  // Add the pass to the pass manager...
-  PM.add(P);
-
-  // If we are verifying all of the intermediate steps, add the verifier...
-  if (VerifyEach)
-    PM.add(createVerifierPass());
-}
-
-namespace llvm {
-
-
-static void AddStandardCompilePasses(legacy::PassManager &PM) {
-  PM.add(createVerifierPass());                  // Verify that input is correct
-
-  // If the -strip-debug command line option was specified, do it.
-  if (StripDebug)
-    addPass(PM, createStripSymbolsPass(true));
-
-  addPass(PM, createCFGSimplificationPass());    // Clean up disgusting code
-  addPass(PM, createPromoteMemoryToRegisterPass());// Kill useless allocas
-  addPass(PM, createGlobalOptimizerPass());      // Optimize out global vars
-  addPass(PM, createGlobalDCEPass());            // Remove unused fns and globs
-#if LLVM_VERSION_CODE >= LLVM_VERSION(11, 0)
-  addPass(PM, createSCCPPass());                 // Constant prop with SCCP
-#else
-  addPass(PM, createIPConstantPropagationPass());// IP Constant Propagation
-#endif
-  addPass(PM, createDeadArgEliminationPass());   // Dead argument elimination
-  addPass(PM, createInstructionCombiningPass()); // Clean up after IPCP & DAE
-  addPass(PM, createCFGSimplificationPass());    // Clean up after IPCP & DAE
-
-  addPass(PM, createPruneEHPass());              // Remove dead EH info
-  addPass(PM, createPostOrderFunctionAttrsLegacyPass());
-  addPass(PM, createReversePostOrderFunctionAttrsPass()); // Deduce function attrs
-
-  if (!DisableInline)
-    addPass(PM, createFunctionInliningPass());   // Inline small functions
-
-  // If we didn't decide to inline a function, check to see if we can
-  // transform it to pass arguments by value instead of by reference.
-#if LLVM_VERSION_MAJOR <= 14
-  addPass(PM, createArgumentPromotionPass());
-#else
-  // this is not exacly that the argument promotion pass does, but close enough for us
-  addPass(PM, createFunctionSpecializationPass());
-  addPass(PM, createDeadArgEliminationPass());
-#endif
-
-  addPass(PM, createInstructionCombiningPass()); // Cleanup for scalarrepl.
-  addPass(PM, createJumpThreadingPass());        // Thread jumps.
-  addPass(PM, createCFGSimplificationPass());    // Merge & remove BBs
-  addPass(PM, createSROAPass());                 // Break up aggregate allocas
-  addPass(PM, createInstructionCombiningPass()); // Combine silly seq's
-
-  addPass(PM, createTailCallEliminationPass());  // Eliminate tail calls
-  addPass(PM, createCFGSimplificationPass());    // Merge & remove BBs
-  addPass(PM, createReassociatePass());          // Reassociate expressions
-  addPass(PM, createLoopRotatePass());
-  addPass(PM, createLICMPass());                 // Hoist loop invariants
-#if LLVM_VERSION_MAJOR <= 14
-  addPass(PM, createLoopUnswitchPass());         // Unswitch loops.
-#endif
-  // FIXME : Removing instcombine causes nestedloop regression.
-  addPass(PM, createInstructionCombiningPass());
-  addPass(PM, createIndVarSimplifyPass());       // Canonicalize indvars
-  addPass(PM, createLoopDeletionPass());         // Delete dead loops
-  addPass(PM, createLoopUnrollPass());           // Unroll small loops
-  addPass(PM, createInstructionCombiningPass()); // Clean up after the unroller
-  addPass(PM, createGVNPass());                  // Remove redundancies
-  addPass(PM, createMemCpyOptPass());            // Remove memcpy / form memset
-  addPass(PM, createSCCPPass());                 // Constant prop with SCCP
-
-  // Run instcombine after redundancy elimination to exploit opportunities
-  // opened up by them.
-  addPass(PM, createInstructionCombiningPass());
-
-  addPass(PM, createDeadStoreEliminationPass()); // Delete dead stores
-  addPass(PM, createAggressiveDCEPass());        // Delete dead instructions
-  addPass(PM, createCFGSimplificationPass());    // Merge & remove BBs
-  addPass(PM, createStripDeadPrototypesPass());  // Get rid of dead prototypes
-  addPass(PM, createConstantMergePass());        // Merge dup global constants
-}
-
-/// Optimize - Perform link time optimizations. This will run the scalar
-/// optimizations, any loaded plugin-optimization modules, and then the
-/// inter-procedural optimizations if applicable.
-void Optimize(Module *M, llvm::ArrayRef<const char *> preservedFunctions) {
-
-  // Instantiate the pass manager to organize the passes.
-  legacy::PassManager Passes;
-
-  // If we're verifying, start off with a verification pass.
-  if (VerifyEach)
-    Passes.add(createVerifierPass());
-
-  // DWD - Run the opt standard pass list as well.
-  AddStandardCompilePasses(Passes);
-
-  // Now that composite has been compiled, scan through the module, looking
-  // for a main function.  If main is defined, mark all other functions
-  // internal.
-  if (!DisableInternalize) {
-    auto PreserveFunctions = [=](const GlobalValue &GV) {
-      StringRef GVName = GV.getName();
-
-      for (const char *fun : preservedFunctions)
-        if (GVName.equals(fun))
-          return true;
-
-      return false;
-    };
-    ModulePass *pass = createInternalizePass(PreserveFunctions);
-    addPass(Passes, pass);
+  NewPMRunner() {
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
   }
 
-  // Propagate constants at call sites into the functions they call.  This
-  // opens opportunities for globalopt (and inlining) by substituting function
-  // pointers passed as arguments to direct uses of functions.
-  addPass(Passes, createIPSCCPPass());
+  void run(ModulePassManager &MPM, llvm::Module &M) { MPM.run(M, MAM); }
+};
+} // namespace
 
-  // Now that we internalized some globals, see if we can hack on them!
-  addPass(Passes, createGlobalOptimizerPass());
+void klee::optimizeModule(llvm::Module *M,
+                          llvm::ArrayRef<const char *> preservedFunctions) {
+  NewPMRunner runner;
+  ModulePassManager MPM;
 
-  // Linking modules together can lead to duplicated global constants, only
-  // keep one copy of each constant...
-  addPass(Passes, createConstantMergePass());
+  // Mark all symbols other than the preserved ones as internal so that the
+  // optimizer can specialise/remove them.
+  if (!DisableInternalize) {
+    std::set<std::string> preserve;
+    for (const char *fun : preservedFunctions)
+      preserve.insert(fun);
 
-  // Remove unused arguments from functions...
-  addPass(Passes, createDeadArgEliminationPass());
+    MPM.addPass(InternalizePass([preserve](const GlobalValue &GV) {
+      return preserve.count(GV.getName().str()) != 0;
+    }));
+    MPM.addPass(GlobalDCEPass());
+  }
 
-  // Reduce the code after globalopt and ipsccp.  Both can open up significant
-  // simplification opportunities, and both can propagate functions through
-  // function pointers.  When this happens, we often have to resolve varargs
-  // calls, etc, so let instcombine do this.
-  addPass(Passes, createInstructionCombiningPass());
+  // Run the standard per-module optimization pipeline.  The exact set of
+  // passes differs from the hand-tuned legacy pipeline, but it performs all
+  // the simplifications KLEE relies on (mem2reg, inlining, CFG cleanup, etc.).
+  OptimizationLevel level =
+      DisableInline ? OptimizationLevel::O1 : OptimizationLevel::O2;
+  MPM.addPass(runner.PB.buildPerModuleDefaultPipeline(level));
 
-  if (!DisableInline)
-    addPass(Passes, createFunctionInliningPass()); // Inline small functions
-
-  addPass(Passes, createPruneEHPass());         // Remove dead EH info
-  addPass(Passes, createGlobalOptimizerPass()); // Optimize globals again.
-  addPass(Passes, createGlobalDCEPass());       // Remove dead functions
-
-  // If we didn't decide to inline a function, check to see if we can
-  // transform it to pass arguments by value instead of by reference.
-#if LLVM_VERSION_MAJOR <= 14
-  addPass(Passes, createArgumentPromotionPass());
-#else
-  // this is not exacly that the argument promotion pass does, but close enough for us
-  addPass(Passes, createFunctionSpecializationPass());
-  addPass(Passes, createDeadArgEliminationPass());
-#endif
-
-  // The IPO passes may leave cruft around.  Clean up after them.
-  addPass(Passes, createInstructionCombiningPass());
-  addPass(Passes, createJumpThreadingPass()); // Thread jumps.
-  addPass(Passes, createSROAPass()); // Break up allocas
-
-  // Run a few AA driven optimizations here and now, to cleanup the code.
-  addPass(Passes, createPostOrderFunctionAttrsLegacyPass());
-  addPass(Passes, createReversePostOrderFunctionAttrsPass()); // Add nocapture
-  addPass(Passes, createGlobalsAAWrapperPass()); // IP alias analysis
-
-  addPass(Passes, createLICMPass());                 // Hoist loop invariants
-  addPass(Passes, createGVNPass());                  // Remove redundancies
-  addPass(Passes, createMemCpyOptPass());            // Remove dead memcpy's
-  addPass(Passes, createDeadStoreEliminationPass()); // Nuke dead stores
-
-  // Cleanup and simplify the code after the scalar optimizations.
-  addPass(Passes, createInstructionCombiningPass());
-
-  addPass(Passes, createJumpThreadingPass());           // Thread jumps.
-  addPass(Passes, createPromoteMemoryToRegisterPass()); // Cleanup jumpthread.
-
-  // Delete basic blocks, which optimization passes may have killed...
-  addPass(Passes, createCFGSimplificationPass());
-
-  // Now that we have optimized the program, discard unreachable functions...
-  addPass(Passes, createGlobalDCEPass());
-
-  // If the -s or -S command line options were specified, strip the symbols out
-  // of the resulting program to make it smaller.  -s and -S are GNU ld options
-  // that we are supporting; they alias -strip-all and -strip-debug.
   if (Strip || StripDebug)
-    addPass(Passes, createStripSymbolsPass(StripDebug && !Strip));
+    MPM.addPass(StripSymbolsPass());
 
-  // The user's passes may leave cruft around; clean up after them.
-  addPass(Passes, createInstructionCombiningPass());
-  addPass(Passes, createCFGSimplificationPass());
-  addPass(Passes, createAggressiveDCEPass());
-  addPass(Passes, createGlobalDCEPass());
+  runner.run(MPM, *M);
+}
 
-  // Run our queue of passes all at once now, efficiently.
-  Passes.run(*M);
+void klee::optimiseAndPrepare(bool OptimiseKLEECall, bool Optimize,
+                              SwitchImplType SwitchType, std::string EntryPoint,
+                              llvm::ArrayRef<const char *> preservedFunctions,
+                              llvm::Module *module) {
+  // Preserve all functions containing klee-related function calls from being
+  // optimised around.
+  if (!OptimiseKLEECall) {
+    legacy::PassManager pm;
+    pm.add(new klee::OptNonePass());
+    pm.run(*module);
+  }
+
+  if (Optimize)
+    optimizeModule(module, preservedFunctions);
+
+  // Needs to happen after linking (since ctors/dtors can be modified)
+  // and optimization (since global optimization can rewrite lists).
+  injectStaticConstructorsAndDestructors(module, EntryPoint);
+
+  // Finally, run the passes that maintain invariants we expect during
+  // interpretation.  CFG simplification and (optionally) the LLVM switch
+  // lowering are built-in passes run through the new PassManager.
+  {
+    NewPMRunner runner;
+    FunctionPassManager FPM;
+    FPM.addPass(SimplifyCFGPass());
+    if (SwitchType == SwitchImplType::eSwitchTypeLLVM)
+      FPM.addPass(llvm::LowerSwitchPass());
+
+    ModulePassManager MPM;
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+    runner.run(MPM, *module);
+  }
+
+  // KLEE's switch lowering and the intrinsic cleaner are legacy passes.
+  {
+    legacy::PassManager pm;
+    if (SwitchType == SwitchImplType::eSwitchTypeSimple)
+      pm.add(new klee::LowerSwitchPass());
+
+    // IntrinsicCleanerPass stores the DataLayout by reference, so it must
+    // outlive pm.run() below.
+    llvm::DataLayout targetData(module->getDataLayout());
+    pm.add(new klee::IntrinsicCleanerPass(targetData));
+    pm.run(*module);
+  }
+
+  // Scalarizer is a built-in transform (new PassManager).
+  {
+    NewPMRunner runner;
+    FunctionPassManager FPM;
+    FPM.addPass(ScalarizerPass());
+
+    ModulePassManager MPM;
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+    runner.run(MPM, *module);
+  }
+
+  // PhiCleaner and FunctionAlias are KLEE legacy passes.
+  {
+    legacy::PassManager pm;
+    pm.add(new klee::PhiCleanerPass());
+    pm.add(new klee::FunctionAliasPass());
+    pm.run(*module);
+  }
 }

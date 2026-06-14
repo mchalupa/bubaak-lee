@@ -12,6 +12,7 @@
 
 #include "klee/ADT/Bits.h"
 #include "klee/ADT/Ref.h"
+#include "klee/Config/Version.h"
 
 #include "klee/Support/CompilerWarning.h"
 DISABLE_WARNING_PUSH
@@ -35,6 +36,18 @@ namespace llvm {
 }
 
 namespace klee {
+
+/// Construct an llvm::APInt of the given bit width from a 64-bit value,
+/// truncating the value to the bit width if necessary.  Starting with LLVM 19
+/// the APInt constructor no longer truncates implicitly (and asserts on
+/// out-of-range values by default), so we must request truncation explicitly.
+inline llvm::APInt makeAPInt64(unsigned width, uint64_t val) {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(19, 0)
+  return llvm::APInt(width, val, /*isSigned=*/false, /*implicitTrunc=*/true);
+#else
+  return llvm::APInt(width, val);
+#endif
+}
 
 class Array;
 class ArrayCache;
@@ -1092,7 +1105,7 @@ public:
   }
 
   static ref<ConstantExpr> alloc(uint64_t v, Width w) {
-    return alloc(llvm::APInt(w, v));
+    return alloc(makeAPInt64(w, v));
   }
 
   static ref<ConstantExpr> create(uint64_t v, Width w) {
