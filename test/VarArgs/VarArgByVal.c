@@ -11,8 +11,10 @@
 // RUN: FileCheck %s --input-file=%t.klee-out/assembly.ll
 //
 // TODO: Make noundef unconditional when LLVM 14 is the oldest supported version.
-// CHECK: call void (ptr, i32, ...) @test1(ptr sret(%struct.foo) align 8 {{.*}}, i32 noundef -1, ptr noundef byval(%struct.foo) align 8 {{.*}}, ptr noundef byval(%struct.bar) align 8 {{.*}})
-// CHECK: call void (ptr, i32, i64, ...) @test2(ptr sret(%struct.foo) align 8 {{.*}}, i32 noundef {{.*}}, i64 noundef {{.*}}, i32 noundef {{.*}}, ptr noundef byval(%struct.foo) align 8 {{.*}}, i64 noundef {{.*}}, ptr noundef byval(%struct.bar) align 8 {{.*}}, ptr noundef byval(%struct.foo) align 8 {{.*}}, ptr noundef byval(%struct.bar) align 8 {{.*}})
+// NOTE: recent clang adds attributes such as "dead_on_unwind writable" before
+// sret, so the patterns tolerate extra attributes between "ptr" and "sret".
+// CHECK: call void (ptr, i32, ...) @test1(ptr {{.*}}sret(%struct.foo) align 8 {{.*}}, i32 noundef -1, ptr noundef byval(%struct.foo) align 8 {{.*}}, ptr noundef byval(%struct.bar) align 8 {{.*}})
+// CHECK: call void (ptr, i32, i64, ...) @test2(ptr {{.*}}sret(%struct.foo) align 8 {{.*}}, i32 noundef {{.*}}, i64 noundef {{.*}}, i32 noundef {{.*}}, ptr noundef byval(%struct.foo) align 8 {{.*}}, i64 noundef {{.*}}, ptr noundef byval(%struct.bar) align 8 {{.*}}, ptr noundef byval(%struct.foo) align 8 {{.*}}, ptr noundef byval(%struct.bar) align 8 {{.*}})
 #include <stdarg.h>
 #include <assert.h>
 #include <stdio.h>
