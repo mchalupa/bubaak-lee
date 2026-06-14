@@ -14,7 +14,12 @@
 #include <stdlib.h>
 
 int main() {
-  return abs(-5) + abs(6);
+  // abs() is lowered to the llvm.abs intrinsic by recent clang and is no longer
+  // an external call, so use two calls to the same external function (printf)
+  // to exercise the external-call warning modes.
+  printf("a\n");
+  printf("b\n");
+  return 0;
   // CHECK-NONE-NOT: calling external
 
   // CHECK-ONCE: calling external
