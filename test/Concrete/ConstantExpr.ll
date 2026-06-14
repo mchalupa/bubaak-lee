@@ -1,4 +1,8 @@
+; This version relies on icmp/select/sext/zext/and/or/mul/shl/lshr/ashr
+; constant expressions that were removed from textual IR in LLVM 16+.
+; See ConstantExprOpaque.ll for the opaque-pointer version used on newer LLVM.
 ; REQUIRES: geq-llvm-15.0
+; REQUIRES: lt-llvm-16.0
 ; RUN: %S/ConcreteTest.py --klee='%klee' --lli=%lli %s
 
 ; Most of the test below use the *address* of gInt as part of their computation,
