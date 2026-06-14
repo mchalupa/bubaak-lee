@@ -1,3 +1,7 @@
+; This version uses typed pointers and the icmp/bitcast constant expressions
+; that were removed from textual IR in LLVM 16+. See GlobalVariableOpaque.ll
+; for the opaque-pointer version used on newer LLVM.
+; REQUIRES: lt-llvm-16.0
 ; RUN: %llvmas %s -f -o %t1.bc
 ; RUN: rm -rf %t.klee-out
 ; Run KLEE — the fork makes the external global symbolic and catches the
