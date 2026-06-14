@@ -1,5 +1,13 @@
 // Darwin does not have strong aliases.
 // REQUIRES: not-darwin
+//
+// This test asserts that a "transparent" function alias compares equal to its
+// aliasee (foo3 == __foo) while a differently-typed alias does not (foo !=
+// __foo). That distinction relied on typed pointers: clang 22 constant-folds
+// these alias address comparisons at compile time (folding foo3 == __foo to
+// false), so KLEE never evaluates them. KLEE's own alias handling maps an
+// alias to its aliasee's address; the failure is purely clang codegen.
+// XFAIL: geq-llvm-22.1
 // RUN: %clang %s -emit-llvm -g -c -o %t1.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out --exit-on-error %t1.bc
