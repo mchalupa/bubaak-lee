@@ -167,8 +167,16 @@ static constexpr std::array handlerInfo = {
 
   // operator delete[](void*)
   add("_ZdaPv", handleDeleteArray, false),
+  // operator delete[](void*, unsigned long) -- sized delete (C++14)
+  add("_ZdaPvm", handleDeleteArray, false),
+  // operator delete[](void*, unsigned int) -- sized delete (C++14, 32-bit)
+  add("_ZdaPvj", handleDeleteArray, false),
   // operator delete(void*)
   add("_ZdlPv", handleDelete, false),
+  // operator delete(void*, unsigned long) -- sized delete (C++14)
+  add("_ZdlPvm", handleDelete, false),
+  // operator delete(void*, unsigned int) -- sized delete (C++14, 32-bit)
+  add("_ZdlPvj", handleDelete, false),
 
   // operator new[](unsigned int)
   add("_Znaj", handleNewArray, true),
@@ -429,7 +437,10 @@ void SpecialFunctionHandler::handleDelete(ExecutionState &state,
   // new/delete, new[]/delete[]).
 
   // XXX should type check args
-  assert(arguments.size()==1 && "invalid number of arguments to delete");
+  // Sized delete (operator delete(void*, size_t)) passes a second size
+  // argument, which we ignore.
+  assert((arguments.size() == 1 || arguments.size() == 2) &&
+         "invalid number of arguments to delete");
   executor.executeFree(state, arguments[0]);
 }
 
@@ -445,7 +456,10 @@ void SpecialFunctionHandler::handleDeleteArray(ExecutionState &state,
                                  KInstruction *target,
                                  const std::vector<Cell> &arguments) {
   // XXX should type check args
-  assert(arguments.size()==1 && "invalid number of arguments to delete[]");
+  // Sized delete[] (operator delete[](void*, size_t)) passes a second size
+  // argument, which we ignore.
+  assert((arguments.size() == 1 || arguments.size() == 2) &&
+         "invalid number of arguments to delete[]");
   executor.executeFree(state, arguments[0]);
 }
 
