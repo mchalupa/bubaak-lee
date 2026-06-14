@@ -3,8 +3,11 @@
 // RUN: %klee --output-dir=%t.klee-out --warnings-only-to-file=false %t1.bc 2>&1 | FileCheck %s
 // REQUIRES: not-freebsd
 
-// Tests that a symbolic write to an object larger than 4 GiB is rejected;
-// the internal 32-bit offset representation cannot model it correctly.
+// Tests that a symbolic write to a huge (> 4 GiB) object succeeds.
+// No physical memory is involved: KLEE models the write as an update node in
+// its symbolic array, so the truncated sizeBound is not a problem for writes.
+// (Symbolic reads from such objects are still rejected because they would
+//  incorrectly fall back to the 1-byte concrete backing store.)
 
 #include "klee/klee.h"
 
@@ -20,7 +23,9 @@ int main() {
   unsigned k;
   klee_make_symbolic(&k, sizeof(k), "k");
   klee_assume(k < 100);
-  p[k] = 42;
-  // CHECK: Symbolic writes to objects larger than 4 GiB are not allowed (object size: 4294967297 bytes)
+  p[k] = 42;  // symbolic write — should succeed
+
+  // CHECK-NOT: KLEE: ERROR
+  // CHECK: KLEE: done:
   return 0;
 }

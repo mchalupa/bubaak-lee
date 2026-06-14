@@ -5114,17 +5114,6 @@ void Executor::executeMemoryOperation(ExecutionState &state,
             terminateStateOnProgramError(state, "memory error: object read only",
                                          StateTerminationType::ReadOnly);
           } else {
-            if (!isa<ConstantExpr>(offset)) {
-              if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
-                if (CE->getZExtValue() > UINT32_MAX) {
-                  terminateStateOnExecError(
-                      state, "Symbolic writes to objects larger than 4 GiB are "
-                             "not allowed (object size: " +
-                                 llvm::utostr(CE->getZExtValue()) + " bytes).");
-                  return;
-                }
-              }
-            }
             ObjectState *wos = state.addressSpace.getWriteable(mo, os);
             wos->write(offset, value);
           }
@@ -5193,22 +5182,9 @@ void Executor::executeMemoryOperation(ExecutionState &state,
           terminateStateOnProgramError(*bound, "memory error: object read only",
                                        StateTerminationType::ReadOnly);
         } else {
-          ref<Expr> writeOffset = addressOptim.getOffset();
-          if (!isa<ConstantExpr>(writeOffset)) {
-            if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
-              if (CE->getZExtValue() > UINT32_MAX) {
-                terminateStateOnExecError(
-                    *bound, "Symbolic writes to objects larger than 4 GiB are "
-                            "not allowed (object size: " +
-                                llvm::utostr(CE->getZExtValue()) + " bytes).");
-                unbound = branches.second;
-                continue;
-              }
-            }
-          }
           ObjectState *wos = bound->addressSpace.getWriteable(mo, os);
           // TODO segment
-          wos->write(writeOffset, value);
+          wos->write(addressOptim.getOffset(), value);
         }
       } else {
         ref<Expr> readOffset = addressOptim.getOffset();
