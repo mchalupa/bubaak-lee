@@ -873,12 +873,6 @@ void Executor::initializeGlobalAliases() {
 void Executor::initializeGlobalObjects(ExecutionState &state) {
   const Module *m = kmodule->module.get();
 
-  // remember constant objects to initialise their counter part for external
-  // calls
-  std::vector<ObjectState *> constantObjects;
-  SegmentAddressMap initializedMOs;
-
-
   for (const GlobalVariable &v : m->globals()) {
     MemoryObject *mo = globalObjects.find(&v)->second;
     ObjectState *os = bindObjectInState(state, mo, false);
@@ -918,37 +912,14 @@ void Executor::initializeGlobalObjects(ExecutionState &state) {
         }
       }
     } else if (v.hasInitializer()) {
-      void *address = memory->allocateMemory(
-          mo->allocatedSize, getAllocationAlignment(mo->allocSite));
-      if (!address)
-        klee_error("Couldn't allocate memory for external function");
-
-      initializedMOs.emplace(mo->segment, reinterpret_cast<uint64_t>(address));
-      state.addressSpace.concreteAddressMap.emplace(
-          reinterpret_cast<uint64_t>(address), mo->getSegment());
-      state.addressSpace.segmentMap.replace({mo->getSegment(), mo});
-
       initializeGlobalObject(state, os, v.getInitializer(), 0);
-      if (v.isConstant()) {
+      if (v.isConstant())
         os->setReadOnly(true);
-        // initialise constant memory that may be used with external calls
-        state.addressSpace.copyOutConcrete(mo, os);
-      }
     } else {
       // this should not happen in our fork...
       klee_warning("Initializing global to random");
       os->initializeToRandom();
     }
-  }
-
-  // initialise constant memory that is potentially used with external calls
-  if (!constantObjects.empty()) {
-    // initialise the actual memory with constant values
-    state.addressSpace.copyOutConcretes(initializedMOs);
-
-    // mark constant objects as read-only
-    for (auto obj : constantObjects)
-      obj->setReadOnly(true);
   }
 }
 
@@ -4607,6 +4578,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
             if (!addr)
               klee_error("Couldn't allocate memory for external function");
             address = reinterpret_cast<uint64_t>(addr);
+            state.addressSpace.concreteAddressMap.emplace(address,
+                                                          op.first->segment);
           }
           resolvedMOs.emplace(op.first->segment, address);
 
@@ -4653,6 +4626,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
             if (!addr)
               klee_error("Couldn't allocate memory for external function");
             address = reinterpret_cast<uint64_t>(addr);
+            state.addressSpace.concreteAddressMap.emplace(address,
+                                                          op.first->segment);
           }
 
           resolvedMOs.insert({op.first->segment, address});
