@@ -1,5 +1,10 @@
 // REQUIRES: x86_64
 
+// LLVM 22 removed TargetLowering::ExpandInlineAsm, which KLEE used to raise
+// inline assembly (e.g. byte-swap sequences) into regular IR. Without it the
+// asm remains an (unsupported) external call with a symbolic argument.
+// XFAIL: geq-llvm-22.1
+
 // RUN: %clang %s -emit-llvm %O0opt -c -o %t1.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out --exit-on-error %t1.bc
