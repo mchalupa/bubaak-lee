@@ -387,7 +387,21 @@ ref<Expr> ObjectStatePlane::read8(ref<Expr> offset) const {
 
   const UpdateList &updates = getUpdates();
 
-  if (symbolic || isa<ConstantExpr>(parent->getObject()->size)) {
+  // For objects with a concrete size > UINT32_MAX, sizeBound is truncated to
+  // a small value (e.g. 4294967297 → 1).  Using a bare ReadExpr would return
+  // an unconstrained solver value for indices beyond sizeBound.  Route these
+  // through the SelectExpr / initialValue fallback below so that bytes not
+  // covered by the concrete store or update nodes correctly resolve to
+  // initialValue (0 for fresh zero-initialised allocations).
+  bool sizeExceedsWordBound = false;
+  if (!symbolic) {
+    if (const ConstantExpr *CE =
+            dyn_cast<ConstantExpr>(parent->getObject()->size))
+      sizeExceedsWordBound = CE->getZExtValue() > UINT32_MAX;
+  }
+
+  if (!sizeExceedsWordBound &&
+      (symbolic || isa<ConstantExpr>(parent->getObject()->size))) {
     return ReadExpr::create(updates, ZExtExpr::create(offset, Expr::Int32));
   }
 

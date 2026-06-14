@@ -5118,19 +5118,6 @@ void Executor::executeMemoryOperation(ExecutionState &state,
             wos->write(offset, value);
           }
         } else {
-          // Reject symbolic reads from objects larger than 4 GiB: the internal
-          // representation uses 32-bit offsets and cannot represent them.
-          if (!isa<ConstantExpr>(offset)) {
-            if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
-              if (CE->getZExtValue() > UINT32_MAX) {
-                terminateStateOnExecError(
-                    state, "Symbolic reads from objects larger than 4 GiB are "
-                           "not allowed (object size: " +
-                               llvm::utostr(CE->getZExtValue()) + " bytes).");
-                return;
-              }
-            }
-          }
           KValue result = os->read(offset, type);
 
           if (interpreterOpts.MakeConcreteSymbolic) {
@@ -5187,20 +5174,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
           wos->write(addressOptim.getOffset(), value);
         }
       } else {
-        ref<Expr> readOffset = addressOptim.getOffset();
-        if (!isa<ConstantExpr>(readOffset)) {
-          if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
-            if (CE->getZExtValue() > UINT32_MAX) {
-              terminateStateOnExecError(
-                  *bound, "Symbolic reads from objects larger than 4 GiB are "
-                          "not allowed (object size: " +
-                              llvm::utostr(CE->getZExtValue()) + " bytes).");
-              unbound = branches.second;
-              continue;
-            }
-          }
-        }
-        KValue result = os->read(readOffset, type);
+        KValue result = os->read(addressOptim.getOffset(), type);
         bindLocal(target, *bound, result);
       }
     }
