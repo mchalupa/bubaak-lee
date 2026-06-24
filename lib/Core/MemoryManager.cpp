@@ -10,252 +10,231 @@
 #include "MemoryManager.h"
 
 #include "CoreStats.h"
-#include "ExecutionState.h"
 #include "Memory.h"
 
 #include "klee/Expr/Expr.h"
 #include "klee/Support/ErrorHandling.h"
 
-#include "klee/Support/CompilerWarning.h"
-DISABLE_WARNING_PUSH
-DISABLE_WARNING_DEPRECATED_DECLARATIONS
-#include "llvm/IR/GlobalVariable.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/Support/Alignment.h"
-DISABLE_WARNING_POP
 
+#include <cassert>
 #include <cinttypes>
-#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <sys/mman.h>
-#include <tuple>
-#include <string>
+#include <unistd.h>
 
 using namespace klee;
 
 namespace klee {
-std::uint32_t MemoryManager::quarantine;
-
-std::size_t MemoryManager::pageSize = sysconf(_SC_PAGE_SIZE);
-
-bool MemoryManager::isDeterministic;
-
+// Referenced by tools/klee/main.cpp to list the option categories.
 llvm::cl::OptionCategory MemoryCat("Memory management options",
                                    "These options control memory management.");
+} // namespace klee
 
-llvm::cl::opt<bool, true> DeterministicAllocation(
-    "kdalloc",
-    llvm::cl::desc("Allocate memory deterministically (default=true)"),
-    llvm::cl::location(MemoryManager::isDeterministic), llvm::cl::init(true),
-    llvm::cl::cat(MemoryCat));
+namespace {
 
-llvm::cl::opt<bool> DeterministicAllocationMarkAsUnneeded(
-    "kdalloc-mark-as-unneeded",
-    llvm::cl::desc("Mark allocations as unneeded after external function calls "
-                   "(default=true)"),
-    llvm::cl::init(true), llvm::cl::cat(MemoryCat));
+llvm::cl::opt<bool> DeterministicAllocation(
+    "allocate-determ",
+    llvm::cl::desc("Allocate memory deterministically (default=false)"),
+    llvm::cl::init(false), llvm::cl::cat(MemoryCat));
 
-llvm::cl::opt<unsigned> DeterministicAllocationGlobalsSize(
-    "kdalloc-globals-size",
-    llvm::cl::desc("Reserved memory for globals in GiB (default=10)"),
-    llvm::cl::init(10), llvm::cl::cat(MemoryCat));
-
-llvm::cl::opt<unsigned> DeterministicAllocationConstantsSize(
-    "kdalloc-constants-size",
-    llvm::cl::desc("Reserved memory for constant globals in GiB (default=10)"),
-    llvm::cl::init(10), llvm::cl::cat(MemoryCat));
-
-llvm::cl::opt<unsigned> DeterministicAllocationHeapSize(
-    "kdalloc-heap-size",
-    llvm::cl::desc("Reserved memory for heap in GiB (default=1024)"),
-    llvm::cl::init(1024), llvm::cl::cat(MemoryCat));
-
-llvm::cl::opt<unsigned> DeterministicAllocationStackSize(
-    "kdalloc-stack-size",
-    llvm::cl::desc("Reserved memory for stack in GiB (default=100)"),
-    llvm::cl::init(128), llvm::cl::cat(MemoryCat));
-
-llvm::cl::opt<std::uintptr_t> DeterministicAllocationGlobalsStartAddress(
-    "kdalloc-globals-start-address",
+llvm::cl::opt<unsigned> DeterministicAllocationSize(
+    "allocate-determ-size",
     llvm::cl::desc(
-        "Start address for globals segment (has to be page aligned)"),
-    llvm::cl::cat(MemoryCat));
-
-llvm::cl::opt<std::uintptr_t> DeterministicAllocationConstantsStartAddress(
-    "kdalloc-constants-start-address",
-    llvm::cl::desc(
-        "Start address for constant globals segment (has to be page aligned)"),
-    llvm::cl::cat(MemoryCat));
-
-llvm::cl::opt<std::uintptr_t> DeterministicAllocationHeapStartAddress(
-    "kdalloc-heap-start-address",
-    llvm::cl::desc("Start address for heap segment (has to be page aligned)"),
-    llvm::cl::cat(MemoryCat));
-
-llvm::cl::opt<std::uintptr_t> DeterministicAllocationStackStartAddress(
-    "kdalloc-stack-start-address",
-    llvm::cl::desc("Start address for stack segment (has to be page aligned)"),
-    llvm::cl::cat(MemoryCat));
-
-struct QuarantineSizeParser : public llvm::cl::parser<std::uint32_t> {
-  explicit QuarantineSizeParser(llvm::cl::Option &O)
-      : llvm::cl::parser<std::uint32_t>(O) {}
-
-  bool parse(llvm::cl::Option &O, llvm::StringRef ArgName, llvm::StringRef Arg,
-             std::uint32_t &Val) {
-    if (Arg == "-1") {
-      Val = kdalloc::Allocator::unlimitedQuarantine;
-    } else if (Arg.getAsInteger(0, Val)) {
-      return O.error("'" + Arg + "' value invalid!");
-    }
-
-    return false;
-  }
-};
-
-llvm::cl::opt<std::uint32_t, true, QuarantineSizeParser>
-    DeterministicAllocationQuarantineSize(
-        "kdalloc-quarantine",
-        llvm::cl::desc("Size of quarantine queues in allocator (default=8, "
-                       "disabled=0, unlimited=-1)"),
-        llvm::cl::location(klee::MemoryManager::quarantine),
-        llvm::cl::value_desc("size"), llvm::cl::init(8),
-        llvm::cl::cat(MemoryCat));
+        "Preallocated memory for deterministic allocation in MB (default=100)"),
+    llvm::cl::init(100), llvm::cl::cat(MemoryCat));
 
 llvm::cl::opt<bool> NullOnZeroMalloc(
     "return-null-on-zero-malloc",
     llvm::cl::desc("Returns NULL if malloc(0) is called (default=false)"),
     llvm::cl::init(false), llvm::cl::cat(MemoryCat));
+
+llvm::cl::opt<unsigned> RedzoneSize(
+    "redzone-size",
+    llvm::cl::desc("Set the size of the redzones to be added after each "
+                   "deterministic allocation (in bytes). This helps detect "
+                   "out-of-bounds accesses (default=10)"),
+    llvm::cl::init(10), llvm::cl::cat(MemoryCat));
+
+llvm::cl::opt<unsigned long long> DeterministicStartAddress(
+    "allocate-determ-start-address",
+    llvm::cl::desc("Start address for deterministic allocation. Has to be page "
+                   "aligned (default=0x7ff30000000)"),
+    llvm::cl::init(0x7ff30000000), llvm::cl::cat(MemoryCat));
+
 } // namespace
 
 /***/
-MemoryManager::MemoryManager(ArrayCache *_arrayCache)
-    : arrayCache(_arrayCache), lastSegment(FIRST_ORDINARY_SEGMENT) {
-  if (DeterministicAllocation) {
-    if (DeterministicAllocationQuarantineSize ==
-        kdalloc::Allocator::unlimitedQuarantine) {
-      klee_message("Deterministic allocator: Using unlimited quarantine");
-    } else if (DeterministicAllocationQuarantineSize != 0) {
-      klee_message("Deterministic allocator: Using quarantine queue size %u",
-                   DeterministicAllocationQuarantineSize.getValue());
+
+MmapAllocation::MmapAllocation(size_t spacesize, void *expectedAddr, int flgs)
+    : dataSize(spacesize), expectedAddress(expectedAddr), flags(flgs) {
+  initialize();
+}
+
+void MmapAllocation::initialize(size_t spacesize, void *expectedAddr, int flgs) {
+  dataSize = spacesize;
+  expectedAddress = expectedAddr;
+  flags = flgs;
+  initialize();
+}
+
+void MmapAllocation::initialize() {
+  assert(data == nullptr && dataSize > 0);
+
+  char *newSpace =
+      (char *)mmap(expectedAddress, dataSize, PROT_READ | PROT_WRITE,
+                   MAP_ANONYMOUS | MAP_PRIVATE | flags, -1, 0);
+
+  if (newSpace == MAP_FAILED) {
+    klee_error("Couldn't mmap() memory for deterministic allocations");
+  }
+  if (expectedAddress != newSpace && expectedAddress != nullptr) {
+    klee_error("Could not allocate memory deterministically");
+  }
+
+  if (expectedAddress != nullptr) {
+    klee_message("Deterministic memory allocation starting from %p", newSpace);
+  }
+
+  data = newSpace;
+  nextFreeSlot = newSpace;
+
+  assert(data != nullptr && dataSize > 0);
+}
+
+MmapAllocation::MmapAllocation(MmapAllocation &&rhs)
+    : data(rhs.data), nextFreeSlot(rhs.nextFreeSlot), dataSize(rhs.dataSize) {
+  rhs.data = rhs.nextFreeSlot = nullptr;
+  rhs.dataSize = 0;
+}
+
+MmapAllocation::~MmapAllocation() {
+  if (data)
+    munmap(data, dataSize);
+}
+
+void *MmapAllocation::getNextFreeSlot(size_t alignment) const {
+  return (void *)llvm::alignTo((uint64_t)nextFreeSlot + alignment - 1,
+                               alignment);
+}
+
+bool MmapAllocation::hasSpace(size_t size, size_t alignment) const {
+  return ((unsigned char *)getNextFreeSlot(alignment) + size <
+          (unsigned char *)data + dataSize);
+}
+
+void *MmapAllocation::allocate(size_t size, size_t alignment) {
+  auto address = getNextFreeSlot(alignment);
+  nextFreeSlot = ((unsigned char *)address) + size;
+  return address;
+}
+
+size_t MmapAllocation::getUsedSize() const {
+  return (unsigned char *)nextFreeSlot - (unsigned char *)data;
+}
+
+void *MmapAllocator::allocate(size_t size, size_t alignment) {
+  for (auto &block : blocks) {
+    if (block.hasSpace(size, alignment))
+      return block.allocate(size, alignment);
+  }
+
+  blocks.emplace_back(blockSize, nullptr, flags);
+  return blocks.back().allocate(size, alignment);
+}
+
+size_t MmapAllocator::getUsedSize() const {
+  size_t size = 0;
+  for (const auto &block : blocks)
+    size += block.getUsedSize();
+  return size;
+}
+
+size_t AllocatorMap::getAppropriateBlockSize(size_t allocationSize) const {
+  return BASE_BLOCK_SIZE * (allocationSize / BASE_BLOCK_SIZE + 1);
+}
+
+MmapAllocator &AllocatorMap::getOrCreateAllocator(size_t blockSize) {
+  auto it = allocators.find(blockSize);
+  if (it == allocators.end()) {
+    it = allocators.emplace_hint(it, blockSize, MmapAllocator{blockSize, flags});
+  }
+  return it->second;
+}
+
+void *AllocatorMap::allocate(size_t size, size_t alignment) {
+  size_t blockSize = getAppropriateBlockSize(size);
+  auto &alloc = getOrCreateAllocator(blockSize);
+  return alloc.allocate(size, alignment);
+}
+
+MemoryAllocator::MemoryAllocator(bool determ, bool lowmem, size_t determ_size,
+                                 void *expectedAddr)
+    : deterministic(determ), lowmem(lowmem), lowmemAllocator(MAP_32BIT) {
+  if (deterministic) {
+    klee_message("Allocating memory deterministically");
+    deterministicMem.initialize(determ_size, expectedAddr);
+  }
+
+  if (lowmem) {
+    klee_message("Allocating memory with 32-bit addresses");
+  }
+}
+
+void *MemoryAllocator::allocate(size_t size, size_t alignment) {
+  if (deterministic) {
+    auto address = deterministicMem.allocate(size + RedzoneSize, alignment);
+    if (!address) {
+      klee_warning_once(0,
+                        "Couldn't allocate %" PRIu64
+                        " bytes. Not enough deterministic space left.",
+                        (uint64_t)size);
     }
-
-    std::vector<std::tuple<std::string,
-                           std::uintptr_t, // start address (0 if none
-                                           // requested)
-                           std::size_t,    // size of segment
-                           std::reference_wrapper<kdalloc::AllocatorFactory>,
-                           kdalloc::Allocator *>>
-        requestedSegments;
-    requestedSegments.emplace_back(
-        "globals",
-        DeterministicAllocationGlobalsStartAddress
-            ? DeterministicAllocationGlobalsStartAddress.getValue()
-            : 0,
-        static_cast<std::size_t>(
-            DeterministicAllocationGlobalsSize.getValue()) *
-            1024 * 1024 * 1024,
-        globalsFactory, &globalsAllocator);
-    requestedSegments.emplace_back(
-        "constants",
-        DeterministicAllocationConstantsStartAddress
-            ? DeterministicAllocationConstantsStartAddress.getValue()
-            : 0,
-        static_cast<std::size_t>(
-            DeterministicAllocationConstantsSize.getValue()) *
-            1024 * 1024 * 1024,
-        constantsFactory, &constantsAllocator);
-    requestedSegments.emplace_back(
-        "heap",
-        DeterministicAllocationHeapStartAddress
-            ? DeterministicAllocationHeapStartAddress.getValue()
-            : 0,
-        static_cast<std::size_t>(DeterministicAllocationHeapSize.getValue()) *
-            1024 * 1024 * 1024,
-        heapFactory, nullptr);
-    requestedSegments.emplace_back(
-        "stack",
-        DeterministicAllocationStackStartAddress
-            ? DeterministicAllocationStackStartAddress.getValue()
-            : 0,
-        static_cast<std::size_t>(DeterministicAllocationStackSize.getValue()) *
-            1024 * 1024 * 1024,
-        stackFactory, nullptr);
-
-    // check invariants
-    llvm::Align pageAlignment(pageSize);
-    for (auto &requestedSegment : requestedSegments) {
-      auto &segment1 = std::get<0>(requestedSegment);
-      auto &start1 = std::get<1>(requestedSegment);
-      auto &size1 = std::get<2>(requestedSegment);
-      // check for page alignment
-      // NOTE: sizes are assumed to be page aligned due to multiplication
-      if (start1 != 0 && !llvm::isAligned(pageAlignment, start1)) {
-        klee_error("Deterministic allocator: Requested start address for %s "
-                   "is not page aligned (page size: %" PRIu64 " B)",
-                   segment1.c_str(), pageAlignment.value());
+    return address;
+  } else if (lowmem) {
+    return lowmemAllocator.allocate(size, alignment);
+  } else {
+    // Use malloc for the standard case
+    if (alignment <= 8)
+      return malloc(size);
+    else {
+      void *address = nullptr;
+      int res = posix_memalign(&address, alignment, size);
+      if (res < 0) {
+        klee_warning("Allocating aligned memory failed.");
+        return nullptr;
       }
 
-      // check for overlap of segments
-      std::uintptr_t end1 = start1 + size1;
-      for (auto &requestedSegment : requestedSegments) {
-        auto &segment2 = std::get<0>(requestedSegment);
-        auto &start2 = std::get<1>(requestedSegment);
-        auto &size2 = std::get<2>(requestedSegment);
-        if (start1 != 0 && start2 != 0 && segment1 != segment2) {
-          std::uintptr_t end2 = start2 + size2;
-          if (!(end1 <= start2 || start1 >= end2)) {
-            klee_error("Deterministic allocator: Requested mapping for %s "
-                       "(start-address=0x%" PRIxPTR " size=%zu GiB) "
-                       "overlaps with that for %s "
-                       "(start-address=0x%" PRIxPTR " size=%zu GiB)",
-                       segment1.c_str(), start1, size1 / (1024 * 1024 * 1024),
-                       segment2.c_str(), start2, size2 / (1024 * 1024 * 1024));
-          }
-        }
-      }
-    }
-
-    // initialize factories and allocators
-    for (auto &requestedSegment : requestedSegments) {
-      auto &segment = std::get<0>(requestedSegment);
-      auto &start = std::get<1>(requestedSegment);
-      auto &size = std::get<2>(requestedSegment);
-      auto &factory = std::get<3>(requestedSegment);
-      auto &allocator = std::get<4>(requestedSegment);
-      factory.get() = kdalloc::AllocatorFactory(
-          start, size, DeterministicAllocationQuarantineSize);
-
-      if (!factory.get()) {
-        klee_error("Deterministic allocator: Could not allocate mapping for %s "
-                   "(start-address=0x%" PRIxPTR " size=%zu GiB): %s",
-                   segment.c_str(), start, size / (1024 * 1024 * 1024),
-                   strerror(errno));
-      }
-      if (start && factory.get().getMapping().getBaseAddress() !=
-                       reinterpret_cast<void *>(start)) {
-        klee_error("Deterministic allocator: Could not allocate mapping for %s "
-                   "at requested address",
-                   segment.c_str());
-      }
-      if (factory.get().getMapping().getSize() != size) {
-        klee_error("Deterministic allocator: Could not allocate mapping for %s "
-                   "with the requested size",
-                   segment.c_str());
-      }
-
-      klee_message("Deterministic allocator: %s "
-                   "(start-address=0x%" PRIxPTR " size=%zu GiB)",
-                   segment.c_str(),
-                   reinterpret_cast<std::uintptr_t>(
-                       factory.get().getMapping().getBaseAddress()),
-                   size / (1024 * 1024 * 1024));
-      if (allocator) {
-        *allocator = factory.get().makeAllocator();
-      }
+      return address;
     }
   }
 }
+
+void MemoryAllocator::deallocate(void *mem) {
+  // Deterministic memory is munmap'ed when the allocator is destroyed; lowmem
+  // (mmap'ed) memory likewise. Only plain malloc'ed memory is freed here.
+  if (!deterministic && !lowmem)
+    free(mem);
+}
+
+void MemoryAllocator::useLowMemory(bool lm) {
+  lowmem = lm;
+  if (lowmem) {
+    klee_message("Allocating memory with 32-bit addresses");
+  }
+}
+
+/***/
+
+MemoryManager::MemoryManager(ArrayCache *_arrayCache)
+    : arrayCache(_arrayCache),
+      allocator(DeterministicAllocation, /*lowmem=*/false,
+                static_cast<size_t>(DeterministicAllocationSize.getValue()) *
+                    1024 * 1024,
+                reinterpret_cast<void *>(DeterministicStartAddress.getValue())),
+      lastSegment(FIRST_ORDINARY_SEGMENT) {}
 
 MemoryManager::~MemoryManager() {
   while (!objects.empty()) {
@@ -279,6 +258,7 @@ MemoryObject *MemoryManager::allocate(ref<Expr> size, bool isLocal,
                                       bool isGlobal, ExecutionState *state,
                                       const llvm::Value *allocSite,
                                       size_t alignment) {
+  (void)state;
   uint64_t concreteSize = 0;
   bool hasConcreteSize = false;
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(size)) {
@@ -338,6 +318,11 @@ MemoryObject *MemoryManager::allocateFixed(uint64_t size,
   return res;
 }
 
+void MemoryManager::deallocate(const MemoryObject *mo) {
+  (void)mo;
+  assert(0);
+}
+
 void MemoryManager::markFreed(MemoryObject *mo) {
   if (objects.find(mo) != objects.end()) {
     // No real process memory is owned by the object; just drop it.
@@ -345,21 +330,6 @@ void MemoryManager::markFreed(MemoryObject *mo) {
   }
 }
 
-bool MemoryManager::markMappingsAsUnneeded() {
-  if (!DeterministicAllocation)
-    return false;
-
-  if (!DeterministicAllocationMarkAsUnneeded)
-    return false;
-
-  globalsFactory.getMapping().clear();
-  heapFactory.getMapping().clear();
-  stackFactory.getMapping().clear();
-
-  return true;
-}
-
 size_t MemoryManager::getUsedDeterministicSize() const {
-  // TODO: implement
-  return 0;
+  return allocator.getUsedDeterministicSize();
 }

@@ -38,7 +38,6 @@
 #include "klee/Expr/ExprPPrinter.h"
 #include "klee/Expr/ExprSMTLIBPrinter.h"
 #include "klee/Expr/ExprUtil.h"
-#include "klee/KDAlloc/kdalloc.h"
 #include "klee/Module/Cell.h"
 #include "klee/Module/InstructionInfoTable.h"
 #include "klee/Module/KCallable.h"
@@ -94,6 +93,7 @@
 #include <sstream>
 #include <string>
 #include <sys/mman.h>
+#include <unistd.h>
 #include <sys/resource.h>
 #include <vector>
 
@@ -247,15 +247,6 @@ cl::opt<ExtCallWarnings> ExternalCallWarnings(
         clEnumValN(ExtCallWarnings::All, "all",
                    "Always warn")),
     cl::init(ExtCallWarnings::OncePerFunction),
-    cl::cat(ExtCallsCat));
-
-cl::opt<std::size_t> ExternalPageThreshold(
-    "kdalloc-external-page-threshold", cl::init(1024),
-    cl::desc(
-        "Threshold for garbage collecting pages used by external calls. If "
-        "there is a significant number of infrequently used pages resident in "
-        "memory, these will only be cleaned up if the total number of pages "
-        "used for external calls is above the given threshold (default=1024)."),
     cl::cat(ExtCallsCat));
 
 /*** Seeding options ***/
@@ -4977,19 +4968,6 @@ void Executor::resolveExact(ExecutionState &state,
         return;
       }
     }
-    auto CE = dyn_cast<ConstantExpr>(addressOptim.getOffset());
-    if (MemoryManager::isDeterministic && CE) {
-      using kdalloc::LocationInfo;
-      auto ptr = reinterpret_cast<void *>(CE->getZExtValue());
-      auto li = unbound->heapAllocator.locationInfo(ptr, 1);
-      if (li == LocationInfo::LI_AllocatedOrQuarantined &&
-          li.getBaseAddress() == ptr && name == "free") {
-        terminateStateOnProgramError(*unbound, "memory error: double free",
-                                     StateTerminationType::Ptr,
-                                     getKValueInfo(*unbound, addressOptim));
-        return;
-      }
-    }
     terminateStateOnProgramError(
         *unbound, "memory error: invalid pointer: " + name,
         StateTerminationType::Ptr, getKValueInfo(*unbound, addressOptim));
@@ -5211,33 +5189,15 @@ void Executor::executeMemoryOperation(ExecutionState &state,
           return;
         }
       }
-      // Flat-address (segment == 0) pointer: apply null-page and kdalloc checks.
+      // Flat-address (segment == 0) pointer: flag accesses to the null page.
       if (auto CE = dyn_cast<ConstantExpr>(addressOptim.getOffset())) {
         std::uintptr_t ptrval = CE->getZExtValue();
-        auto ptr = reinterpret_cast<void *>(ptrval);
-        if (ptrval < MemoryManager::pageSize) {
+        static const std::uintptr_t pageSize = sysconf(_SC_PAGE_SIZE);
+        if (ptrval < pageSize) {
           terminateStateOnProgramError(
               *unbound, "memory error: null page access",
               StateTerminationType::Ptr, getKValueInfo(*unbound, addressOptim));
           return;
-        } else if (MemoryManager::isDeterministic) {
-          using kdalloc::LocationInfo;
-          auto li = unbound->heapAllocator.locationInfo(ptr, bytes);
-          if (li == LocationInfo::LI_AllocatedOrQuarantined) {
-            // In case there is no size mismatch (checked by resolving for base
-            // address), the object is quarantined.
-            auto base = reinterpret_cast<std::uintptr_t>(li.getBaseAddress());
-            auto baseExpr = Expr::createPointer(base);
-            ObjectPair baseOp;
-            auto zeroSeg = ConstantExpr::create(0, baseExpr->getWidth());
-            if (!unbound->addressSpace.resolveOneConstantSegment(
-                    KValue(zeroSeg, cast<ConstantExpr>(baseExpr)), baseOp)) {
-              terminateStateOnProgramError(
-                  *unbound, "memory error: use after free",
-                  StateTerminationType::Ptr, getKValueInfo(*unbound, addressOptim));
-              return;
-            }
-          }
         }
       }
       terminateStateOnProgramError(
@@ -5490,7 +5450,10 @@ void Executor::runFunctionAsMain(Function *f,
   run(*state);
   executionTree = nullptr;
 
-  // hack to clear memory objects
+  // hack to clear memory objects: destroy the old manager first (releasing any
+  // deterministic mapping) before constructing the replacement, so the new one
+  // can reclaim the same fixed mapping address.
+  memory.reset();
   memory = std::make_unique<MemoryManager>(&arrayCache);
 
   globalObjects.clear();

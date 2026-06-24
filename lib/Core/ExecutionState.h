@@ -19,7 +19,6 @@
 #include "klee/Core/ConcreteValue.h"
 #include "klee/Expr/Constraints.h"
 #include "klee/Expr/Expr.h"
-#include "klee/KDAlloc/kdalloc.h"
 #include "klee/Module/KInstIterator.h"
 #include "klee/Solver/Solver.h"
 #include "klee/System/Time.h"
@@ -259,12 +258,6 @@ public:
 
   /// @brief Address space used by this state (e.g. Global and Heap)
   AddressSpace addressSpace;
-
-  /// @brief Stack allocator (used with deterministic allocation)
-  kdalloc::StackAllocator stackAllocator;
-
-  /// @brief Heap allocator (used with deterministic allocation)
-  kdalloc::Allocator heapAllocator;
 
   /// @brief Constraints collected so far
   ConstraintSet constraints;

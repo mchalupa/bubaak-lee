@@ -78,10 +78,7 @@ ExecutionState::ExecutionState(KFunction *kf, MemoryManager *mm)
     : pc(kf->instructions), prevPC(pc) {
   pushFrame(nullptr, kf);
   setID();
-  if (mm->stackFactory && mm->heapFactory) {
-    stackAllocator = mm->stackFactory.makeAllocator();
-    heapAllocator = mm->heapFactory.makeAllocator();
-  }
+  (void)mm;
 }
 
 ExecutionState::~ExecutionState() {
@@ -104,8 +101,6 @@ ExecutionState::ExecutionState(const ExecutionState& state):
     incomingBBIndex(state.incomingBBIndex),
     depth(state.depth),
     addressSpace(state.addressSpace),
-    stackAllocator(state.stackAllocator),
-    heapAllocator(state.heapAllocator),
     constraints(state.constraints),
     pathOS(state.pathOS),
     symPathOS(state.symPathOS),
