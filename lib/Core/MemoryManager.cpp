@@ -303,49 +303,15 @@ MemoryObject *MemoryManager::allocate(ref<Expr> size, bool isLocal,
     return 0;
   }
 
-  uint64_t address = 0;
-  if (DeterministicAllocation) {
-    void *allocAddress;
-
-    size_t kdalloc_size = std::max(hasConcreteSize ? concreteSize : (uint64_t)1,
-                                   (uint64_t)alignment);
-    if (isGlobal) {
-      const llvm::GlobalVariable *gv =
-          dyn_cast<llvm::GlobalVariable>(allocSite);
-      if (isa<llvm::Function>(allocSite) || (gv && gv->isConstant())) {
-        allocAddress = constantsAllocator.allocate(kdalloc_size);
-      } else {
-        allocAddress = globalsAllocator.allocate(kdalloc_size);
-      }
-    } else {
-      if (isLocal) {
-        allocAddress = state->stackAllocator.allocate(kdalloc_size);
-      } else {
-        allocAddress = state->heapAllocator.allocate(kdalloc_size);
-      }
-    }
-
-    address = reinterpret_cast<std::uint64_t>(allocAddress);
-  } else {
-    // allocate 1 byte for symbolic-size allocation, just so we get an address
-    size_t alloc_size = hasConcreteSize ? concreteSize : 1;
-    // Use malloc for the standard case
-    if (alignment <= 8)
-      address = (uint64_t)malloc(alloc_size);
-    else {
-      int res = posix_memalign((void **)&address, alignment, alloc_size);
-      if (res < 0) {
-        klee_warning("Allocating aligned memory failed.");
-        address = 0;
-      }
-    }
-  }
-
-  if (!address)
-    return 0;
+  // Object addresses are symbolic in this memory model: we do NOT allocate any
+  // real process memory here. The object is identified by its segment, and
+  // 'concreteSize' is recorded as allocatedSize so that, if this object is ever
+  // passed to an external function, the external-call path can allocate exactly
+  // that much real memory transiently (see Executor::callExternalFunction and
+  // MemoryManager::allocateMemory) and free it afterwards.
 
   ++stats::allocations;
-  MemoryObject *res = new MemoryObject(++lastSegment, (uint64_t)address,
+  MemoryObject *res = new MemoryObject(++lastSegment, /*address=*/0,
                                        size, concreteSize,
                                        isLocal, isGlobal, false, allocSite, this);
   objects.insert(res);

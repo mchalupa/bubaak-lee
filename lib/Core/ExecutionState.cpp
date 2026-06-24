@@ -161,16 +161,9 @@ void ExecutionState::deallocate(const MemoryObject *mo) {
       base_mos.erase(mos_it->first);
     }
   }
-
-  if (!stackAllocator || !heapAllocator)
-    return;
-
-  auto address = reinterpret_cast<void *>(mo->address);
-  if (mo->isLocal) {
-    stackAllocator.free(address, stackAllocator.getSize(address));
-  } else {
-    heapAllocator.free(address, heapAllocator.getSize(address));
-  }
+  // Object addresses are symbolic and own no real process memory, so there is
+  // nothing to free here. Real memory for external calls is freed by
+  // Executor::callExternalFunction once the call returns.
 }
 
 void ExecutionState::removeAlloca(const MemoryObject *mo) {
