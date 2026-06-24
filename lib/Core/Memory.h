@@ -55,7 +55,6 @@ private:
 public:
   unsigned id;
   uint64_t segment;
-  uint64_t address;
 
   /// size in bytes
   ref<Expr> size;
@@ -98,13 +97,12 @@ public:
       allocSite(0) {
   }
 
-  MemoryObject(uint64_t _address, ref<Expr> _size, size_t _alignment,
+  MemoryObject(ref<Expr> _size, size_t _alignment,
                bool _isLocal, bool _isGlobal, bool _isFixed,
                const llvm::Value *_allocSite,
                MemoryManager *_parent)
     : id(counter++),
       segment(0),
-      address(_address),
       size(ZExtExpr::create(_size, Context::get().getPointerWidth())),
       alignment(_alignment),
       name("unnamed"),
@@ -116,14 +114,13 @@ public:
       allocSite(_allocSite) {
   }
 
-    MemoryObject(uint64_t segment, uint64_t _address, ref<Expr> _size,
+    MemoryObject(uint64_t segment, ref<Expr> _size,
                  uint64_t _allocatedSize,
                  bool _isLocal, bool _isGlobal, bool _isFixed,
                  const llvm::Value *_allocSite,
                  MemoryManager *_parent)
     : id(counter++),
       segment(segment),
-      address(_address),
       size(ZExtExpr::create(_size, Context::get().getPointerWidth())),
       allocatedSize(_allocatedSize),
       name("unnamed"),

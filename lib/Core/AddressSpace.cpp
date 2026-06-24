@@ -277,31 +277,6 @@ void AddressSpace::resolveAddressWithOffset(const ExecutionState &state,
 // transparently avoid screwing up symbolics (if the byte is symbolic
 // then its concrete cache byte isn't being used) but is just a hack.
 
-std::size_t AddressSpace::copyOutConcretes() {
-  std::size_t numPages{};
-  for (const auto &object : objects) {
-    auto &mo = object.first;
-    auto &os = object.second;
-    if (!mo->isUserSpecified && !os->readOnly && os->getSizeBound() != 0) {
-      auto size = std::max((std::size_t)os->getSizeBound(), mo->alignment);
-      numPages +=
-          (size + MemoryManager::pageSize - 1) / MemoryManager::pageSize;
-      auto address = reinterpret_cast<std::uint8_t*>(mo->address);
-
-      if (os->getSizeBound() > mo->allocatedSize)
-        continue;
-
-      if (!os->readOnly) {
-        auto &concreteStore = os->offsetPlane->concreteStore;
-        concreteStore.resize(os->offsetPlane->sizeBound,
-                             os->offsetPlane->initialValue);
-        memcpy(address, concreteStore.data(), concreteStore.size());
-      }
-    }
-  }
-  return numPages;
-}
-
 void AddressSpace::copyOutConcretes(const SegmentAddressMap &resolved,
                                     bool ignoreReadOnly) {
   for (MemoryMap::iterator it = objects.begin(), ie = objects.end();
@@ -331,29 +306,6 @@ void AddressSpace::copyOutConcretes(const SegmentAddressMap &resolved,
   }
 }
 
-void AddressSpace::copyOutConcrete(const MemoryObject *mo,
-                                   const ObjectState *os) const {
-  auto address = reinterpret_cast<std::uint8_t *>(mo->address);
-  size_t moSize = cast<ConstantExpr>(mo->size)->getZExtValue();
-  for (size_t i = 0; i < moSize; i++)
-    address[i] = os->offsetPlane->getConcreteValue(i);
-}
-
-bool AddressSpace::copyInConcretes(bool concretize) {
-  for (auto &obj : objects) {
-    const MemoryObject *mo = obj.first;
-
-    if (!mo->isUserSpecified) {
-      const auto &os = obj.second;
-
-      if (!copyInConcrete(mo, os.get(), mo->address, concretize))
-        return false;
-    }
-  }
-
-  return true;
-}
-
 bool AddressSpace::copyInConcretes(const SegmentAddressMap &resolved,
                                    ExecutionState &state,
                                    TimingSolver *solver) {
@@ -371,45 +323,6 @@ bool AddressSpace::copyInConcretes(const SegmentAddressMap &resolved,
     }
   }
 
-  return true;
-}
-
-bool AddressSpace::copyInConcrete(const MemoryObject *mo, const ObjectState *os,
-                                  uint64_t src_address, bool concretize) {
-  auto address = reinterpret_cast<std::uint8_t*>(src_address);
-
-  size_t moSize = cast<ConstantExpr>(mo->size)->getZExtValue();
-  bool changed = false;
-  for (size_t i = 0; i < moSize; i++) {
-    if (address[i] != os->offsetPlane->getConcreteValue(i)) {
-      changed = true;
-      break;
-    }
-  }
-  if (!changed)
-    return true;
-
-  if (os->readOnly)
-    return false;
-
-  ObjectState *wos = getWriteable(mo, os);
-  if (wos->offsetPlane->unflushedMask.size() == 0) {
-    wos->offsetPlane->concreteStore.resize(moSize, wos->offsetPlane->initialValue);
-    std::memcpy(wos->offsetPlane->concreteStore.data(), address, moSize);
-    return true;
-  }
-
-  if (concretize) {
-    wos->offsetPlane->makeConcrete();
-    wos->offsetPlane->concreteStore.resize(moSize, wos->offsetPlane->initialValue);
-    std::memcpy(wos->offsetPlane->concreteStore.data(), address, moSize);
-  } else {
-    for (size_t i = 0, ie = moSize; i < ie; ++i) {
-      uint8_t external_byte_value = *(address + i);
-      if (external_byte_value != wos->offsetPlane->getConcreteValue(i))
-        wos->offsetPlane->write8(i, external_byte_value);
-    }
-  }
   return true;
 }
 

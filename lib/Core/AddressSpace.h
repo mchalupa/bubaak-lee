@@ -158,14 +158,9 @@ namespace klee {
     /// \return A writeable ObjectState (\a os or a copy).
     ObjectState *getWriteable(const MemoryObject *mo, const ObjectState *os);
 
-    /// Copy the concrete values of all managed ObjectStates into the
-    /// actual system memory location they were allocated at.
-    /// Returns the (hypothetical) number of pages needed provided each written
-    /// object occupies (at least) a single page.
-    std::size_t copyOutConcretes();
-
-    void copyOutConcrete(const MemoryObject *mo, const ObjectState *os) const;
-
+    /// Copy the concrete values of the resolved ObjectStates into the real
+    /// process memory transiently allocated for an external call (mapping
+    /// segment -> real address).
     void copyOutConcretes(const SegmentAddressMap &resolved,
                           bool ignoreReadOnly = false);
 
@@ -175,27 +170,10 @@ namespace klee {
     /// potentially copied) if the memory values are different from
     /// the current concrete values.
     ///
-    /// \param concretize fully concretize the object representation if changed
-    /// externally
-    /// \return true if copy succeeded, otherwise false (e.g. try to modify
-    /// read-only object)
-    bool copyInConcretes(bool concretize);
-
     /// \retval true The copy succeeded.
     /// \retval false The copy failed because a read-only object was modified.
     bool copyInConcretes(const SegmentAddressMap &resolved,
                          ExecutionState &state, TimingSolver *solver);
-
-    /// Updates the memory object with the raw memory from the address
-    ///
-    /// @param mo The MemoryObject to update
-    /// @param os The associated memory state containing the actual data
-    /// @param src_address the address to copy from
-    /// @param concretize fully concretize the object representation if changed
-    /// externally
-    /// @return
-    bool copyInConcrete(const MemoryObject *mo, const ObjectState *os,
-                        uint64_t src_address, bool concretize);
 
     bool copyInConcrete(const MemoryObject *mo, const ObjectState *os,
                         const uint64_t &resolvedAddress, ExecutionState &state,

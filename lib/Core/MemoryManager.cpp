@@ -260,8 +260,8 @@ MemoryManager::MemoryManager(ArrayCache *_arrayCache)
 MemoryManager::~MemoryManager() {
   while (!objects.empty()) {
     MemoryObject *mo = *objects.begin();
-    if (!mo->isFixed && !DeterministicAllocation)
-      free((void *)mo->address);
+    // Objects own no real process memory (addresses are symbolic), so there is
+    // nothing to free here.
     objects.erase(mo);
     delete mo;
   }
@@ -311,7 +311,7 @@ MemoryObject *MemoryManager::allocate(ref<Expr> size, bool isLocal,
   // MemoryManager::allocateMemory) and free it afterwards.
 
   ++stats::allocations;
-  MemoryObject *res = new MemoryObject(++lastSegment, /*address=*/0,
+  MemoryObject *res = new MemoryObject(++lastSegment,
                                        size, concreteSize,
                                        isLocal, isGlobal, false, allocSite, this);
   objects.insert(res);
@@ -326,12 +326,12 @@ MemoryObject *MemoryManager::allocateFixed(uint64_t size,
   MemoryObject *res;
   if (!specialSegment) {
     res =
-        new MemoryObject(++lastSegment, 0, sizeExpr, size,
+        new MemoryObject(++lastSegment, sizeExpr, size,
                          false, true, true, allocSite, this);
   }
   else {
     res =
-        new MemoryObject(specialSegment, 0, sizeExpr, size,
+        new MemoryObject(specialSegment, sizeExpr, size,
                          false, true, true, allocSite, this);
   }
   objects.insert(res);
@@ -340,8 +340,7 @@ MemoryObject *MemoryManager::allocateFixed(uint64_t size,
 
 void MemoryManager::markFreed(MemoryObject *mo) {
   if (objects.find(mo) != objects.end()) {
-    if (!mo->isFixed && !DeterministicAllocation)
-      free((void *)mo->address);
+    // No real process memory is owned by the object; just drop it.
     objects.erase(mo);
   }
 }
