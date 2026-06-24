@@ -130,7 +130,7 @@ llvm::cl::opt<bool> NullOnZeroMalloc(
 
 /***/
 MemoryManager::MemoryManager(ArrayCache *_arrayCache)
-    : arrayCache(_arrayCache), lastSegment(0) {
+    : arrayCache(_arrayCache), lastSegment(FIRST_ORDINARY_SEGMENT) {
   if (DeterministicAllocation) {
     if (DeterministicAllocationQuarantineSize ==
         kdalloc::Allocator::unlimitedQuarantine) {

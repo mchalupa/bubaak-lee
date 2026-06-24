@@ -745,8 +745,11 @@ void Executor::allocateGlobalObjects(ExecutionState &state) {
       // its address can be used for function pointers.
       // TODO: Check whether the object is accessed?
       auto mo = memory->allocate(8, false, true, &state, &f, 8);
-      auto addr = Expr::createPointer(mo->address);
-      legalFunctions.emplace(mo->address, &f);
+      // The function's "address" is its segment id: a unique, non-zero
+      // identifier within FUNCTIONS_SEGMENT. Object addresses are symbolic,
+      // so we never use a real address here.
+      auto addr = Expr::createPointer(mo->segment);
+      legalFunctions.emplace(mo->segment, &f);
       globalAddresses.emplace(&f, KValue(FUNCTIONS_SEGMENT, addr));
     }
   }
@@ -3018,29 +3021,27 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     if (SingleObjectResolution) {
       ref<Expr> base_offset = base.getOffset();
       if (isa<ConstantExpr>(original_base) && !isa<ConstantExpr>(base_offset)) {
-        ref<ConstantExpr> c_orig_base = dyn_cast<ConstantExpr>(original_base);
-
         ObjectPair op;
-        auto zeroSeg = ConstantExpr::create(0, c_orig_base->getWidth());
-        if (state.addressSpace.resolveOneConstantSegment(KValue(zeroSeg, c_orig_base), op)) {
-          state.base_mos[op.first->address].insert(base_offset);
-          ref<ConstantExpr> r =
-              ConstantExpr::alloc(op.first->address, Expr::Int64);
+        // The base object is identified by its segment (object addresses are
+        // symbolic); resolve it via the base pointer's segment.
+        if (isa<ConstantExpr>(base.getSegment()) &&
+            state.addressSpace.resolveOneConstantSegment(base, op)) {
+          state.base_mos[op.first->segment].insert(base_offset);
+          ref<ConstantExpr> r = op.first->getSegmentExpr();
           state.base_addrs[base_offset] = r;
         } else {
-          klee_warning("Failed to find a memory object for address %" PRIx64,
-                       c_orig_base->getZExtValue());
+          klee_warning("Failed to find a memory object for the base pointer");
         }
 
       } else if (!isa<ConstantExpr>(original_base)) {
         auto base_it = state.base_addrs.find(original_base);
         if (base_it != state.base_addrs.end()) {
-          uint64_t address = base_it->second->getZExtValue();
-          auto refs_it = state.base_mos[address].find(base_it->first);
-          if (refs_it != state.base_mos[address].end()) {
-            state.base_mos[address].erase(refs_it);
+          uint64_t seg = base_it->second->getZExtValue();
+          auto refs_it = state.base_mos[seg].find(base_it->first);
+          if (refs_it != state.base_mos[seg].end()) {
+            state.base_mos[seg].erase(refs_it);
           }
-          state.base_mos[address].insert(base_offset);
+          state.base_mos[seg].insert(base_offset);
           state.base_addrs[base_offset] = base_it->second;
           state.base_addrs.erase(base_it->first);
         }
@@ -5026,15 +5027,13 @@ void Executor::executeMemoryOperation(ExecutionState &state,
     resolveSingleObject = false;
     auto base_it = state.base_addrs.find(address.getOffset());
     if (base_it != state.base_addrs.end()) {
-      // Concrete address found in the map, now find the associated memory
-      // object
-      auto zeroSeg = ConstantExpr::create(0, base_it->second->getWidth());
-      KValue baseAddr(zeroSeg, base_it->second);
-      std::optional<uint64_t> baseAddrOffset;
-      if (!state.addressSpace.resolveOne(state, solver.get(), baseAddr, op,
-                                         success, baseAddrOffset) ||
-          !success) {
-        klee_warning("Failed to resolve concrete address from the base_addrs "
+      // Base object segment found in the map, now find the associated memory
+      // object by its segment (object addresses are symbolic).
+      KValue baseAddr(base_it->second,
+                      ConstantExpr::create(0, Context::get().getPointerWidth()));
+      success = state.addressSpace.resolveOneConstantSegment(baseAddr, op);
+      if (!success) {
+        klee_warning("Failed to resolve segment from the base_addrs "
                      "map to a memory object");
       } else {
         // We have resolved the stored concrete address to a memory object.

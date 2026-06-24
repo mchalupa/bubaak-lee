@@ -153,7 +153,7 @@ void ExecutionState::popFrame() {
 
 void ExecutionState::deallocate(const MemoryObject *mo) {
   if (SingleObjectResolution) {
-    auto mos_it = base_mos.find(mo->address);
+    auto mos_it = base_mos.find(mo->segment);
     if (mos_it != base_mos.end()) {
       for (auto it = mos_it->second.begin(); it != mos_it->second.end(); ++it) {
         base_addrs.erase(*it);
