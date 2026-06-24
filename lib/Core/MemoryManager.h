@@ -79,11 +79,19 @@ public:
 
   void useLowMemory(bool /*lm*/) {}
 
+  /// Allocate real process memory transiently, only for the duration of an
+  /// external function call (see Executor::callExternalFunction). The returned
+  /// memory must be released with deallocateMemory().
   void *allocateMemory(size_t size, size_t alignment) {
     void *ptr = nullptr;
     if (posix_memalign(&ptr, alignment < sizeof(void*) ? sizeof(void*) : alignment, size) != 0)
       return nullptr;
     return ptr;
+  }
+
+  /// Release memory obtained from allocateMemory().
+  void deallocateMemory(void *ptr) {
+    free(ptr);
   }
 };
 

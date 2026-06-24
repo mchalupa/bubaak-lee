@@ -4560,6 +4560,25 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   memset(args, 0, allocatedBytes);
   unsigned wordIndex = 2;
   SegmentAddressMap resolvedMOs;
+
+  // Real process memory is allocated only transiently, for the duration of this
+  // external call. This guard frees every buffer we allocate below and drops
+  // its concreteAddressMap entry when the function returns (including on early
+  // error returns). Pre-bound host objects (addExternalObject /
+  // klee_define_fixed_object) are already present in concreteAddressMap, are
+  // never re-allocated here, and so are never freed.
+  struct TransientMemoryGuard {
+    MemoryManager *memory;
+    AddressSpace &addressSpace;
+    std::vector<void *> buffers;
+    ~TransientMemoryGuard() {
+      for (void *buf : buffers) {
+        addressSpace.concreteAddressMap.erase(reinterpret_cast<uint64_t>(buf));
+        memory->deallocateMemory(buf);
+      }
+    }
+  } transient{memory.get(), state.addressSpace, {}};
+
   for (std::vector<Cell>::const_iterator ai = arguments.begin(),
        ae = arguments.end(); ai!=ae; ++ai) {
     uint64_t address = 0;
@@ -4590,6 +4609,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
             address = reinterpret_cast<uint64_t>(addr);
             state.addressSpace.concreteAddressMap.emplace(address,
                                                           op.first->segment);
+            transient.buffers.push_back(addr);
           }
           resolvedMOs.emplace(op.first->segment, address);
 
@@ -4638,6 +4658,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
             address = reinterpret_cast<uint64_t>(addr);
             state.addressSpace.concreteAddressMap.emplace(address,
                                                           op.first->segment);
+            transient.buffers.push_back(addr);
           }
 
           resolvedMOs.insert({op.first->segment, address});
