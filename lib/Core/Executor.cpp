@@ -144,6 +144,14 @@ cl::opt<bool> DumpStatesOnHalt(
     cl::desc("Dump test cases for all active states on exit (default=true)"),
     cl::cat(TestGenCat));
 
+cl::opt<unsigned> MaxDumpedStates(
+    "max-dumped-states",
+    cl::init(0),
+    cl::desc("With -dump-states-on-halt, dump test cases only for this many "
+             "randomly chosen active states, the other states are terminated "
+             "without a test case. Set to 0 to dump all states (default=0)"),
+    cl::cat(TestGenCat));
+
 cl::opt<bool> DumpStatesUnlessExitOnError(
     "dump-states-unless-exit-on-error",
     cl::init(false),
@@ -3818,11 +3826,30 @@ void Executor::doDumpStates() {
   if (states.empty())
     return;
 
-  if (DumpStatesOnHalt)
+  // which states to dump (a random sample if there are too many)
+  std::vector<bool> dump(states.size(), DumpStatesOnHalt);
+  if (DumpStatesOnHalt && MaxDumpedStates > 0 &&
+      states.size() > MaxDumpedStates) {
+    std::vector<size_t> idx(states.size());
+    for (size_t i = 0; i < idx.size(); ++i)
+      idx[i] = i;
+    // partial Fisher-Yates shuffle
+    for (size_t i = 0; i < MaxDumpedStates; ++i) {
+      size_t j = i + theRNG.getInt32() % (idx.size() - i);
+      std::swap(idx[i], idx[j]);
+    }
+    dump.assign(states.size(), false);
+    for (size_t i = 0; i < MaxDumpedStates; ++i)
+      dump[idx[i]] = true;
+    klee_message("halting execution, dumping %u of %zu remaining states",
+                 MaxDumpedStates.getValue(), states.size());
+  } else if (DumpStatesOnHalt) {
     klee_message("halting execution, dumping remaining states");
+  }
 
+  size_t i = 0;
   for (ExecutionState *state : states)
-    if (DumpStatesOnHalt)
+    if (dump[i++])
       terminateStateEarly(*state, "Execution halting.",
                           StateTerminationType::Interrupted);
     else
