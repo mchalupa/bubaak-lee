@@ -5702,7 +5702,8 @@ Executor::getTestVector(const ExecutionState &state) {
         auto w = Context::get().getPointerWidth();
         res.emplace_back(makeAPInt64(w, seg), makeAPInt64(w, val), it.name);
     } else {
-        res.emplace_back(size, val, it.isSigned, it.name);
+        // (a negative signed value is not a valid uint64_t + isSigned)
+        res.emplace_back(value->getAPValue(), it.isSigned, it.name);
     }
     if (it.kinstruction) {
         const auto& D = it.kinstruction->inst->getDebugLoc();
