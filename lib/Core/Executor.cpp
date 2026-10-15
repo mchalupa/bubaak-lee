@@ -3838,6 +3838,13 @@ bool Executor::checkMemoryUsage() {
 }
 
 void Executor::doDumpStates() {
+  // the final progress (the execution ends after dumping the states)
+  if (progressFile) {
+    writeProgress();
+    *progressFile << "# done\n";
+    progressFile->flush();
+  }
+
   if (states.empty())
     return;
 
@@ -3950,6 +3957,11 @@ void Executor::run(ExecutionState &initialState) {
     }
 
     klee_message("seeding done (%d states remain)", (int) states.size());
+    if (progressFile) {
+      writeProgress();
+      *progressFile << "# seeding done\n";
+      progressFile->flush();
+    }
 
     if (OnlySeed) {
       doDumpStates();
