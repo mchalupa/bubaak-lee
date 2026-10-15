@@ -22,17 +22,37 @@
 using namespace klee;
 
 KTestObject *SeedInfo::getNextInput(const MemoryObject *mo,
-                                   bool byName) {
+                                   bool byName, bool strict) {
+  uint64_t size = 0;
+  bool constSize = false;
+  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
+    size = CE->getZExtValue();
+    constSize = true;
+  }
+  return getNextInput(mo->name, size, constSize, byName, strict, mo);
+}
+
+KTestObject *SeedInfo::getNextInput(const std::string &name, uint64_t size,
+                                   bool byName, bool strict) {
+  return getNextInput(name, size, true, byName, strict, nullptr);
+}
+
+KTestObject *SeedInfo::getNextInput(const std::string &name, uint64_t size,
+                                   bool constSize, bool byName, bool strict,
+                                   const void *warnId) {
   if (byName) {
     unsigned i;
     
     for (i=0; i<input->numObjects; ++i) {
       KTestObject *obj = &input->objects[i];
-      if (std::string(obj->name) == mo->name)
+      if (std::string(obj->name) == name)
         if (used.insert(obj).second)
           return obj;
     }
-    
+
+    if (strict)
+      return 0;
+
     // If first unused input matches in size then accept that as
     // well.
     for (i=0; i<input->numObjects; ++i)
@@ -40,17 +60,15 @@ KTestObject *SeedInfo::getNextInput(const MemoryObject *mo,
         break;
     if (i<input->numObjects) {
       KTestObject *obj = &input->objects[i];
-      if (ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
-        if (obj->numBytes == CE->getZExtValue()) {
-          used.insert(obj);
-          klee_warning_once(mo, "using seed input %s[%d] for: %s (no name match)",
-                            obj->name, obj->numBytes, mo->name.c_str());
-          return obj;
-        }
+      if (constSize && obj->numBytes == size) {
+        used.insert(obj);
+        klee_warning_once(warnId, "using seed input %s[%d] for: %s (no name match)",
+                          obj->name, obj->numBytes, name.c_str());
+        return obj;
       }
     }
     
-    klee_warning_once(mo, "no seed input for: %s", mo->name.c_str());
+    klee_warning_once(warnId, "no seed input for: %s", name.c_str());
     return 0;
   } else {
     if (inputPosition >= input->numObjects) {

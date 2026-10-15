@@ -304,6 +304,14 @@ cl::opt<bool> NamedSeedMatching(
     cl::desc("Use names to match symbolic objects to inputs (default=false)."),
     cl::cat(SeedingCat));
 
+cl::opt<bool> StrictNamedSeedMatching(
+    "named-seed-matching-strict",
+    cl::init(false),
+    cl::desc("With -named-seed-matching, use only inputs with the same name, "
+             "never just the next unused input of the same size "
+             "(default=false)."),
+    cl::cat(SeedingCat));
+
 cl::opt<std::string>
     SeedTime("seed-time",
              cl::desc("Amount of time to dedicate to seeds, before normal "
@@ -5237,6 +5245,7 @@ KValue Executor::createNondetValue(ExecutionState &state,
   KValue kval;
   const Array *array = arrayCache.CreateArray(uniqueName, size);
   auto expr = Expr::createTempRead(array, size);
+  const Array *offarray = nullptr;
 
   if (isPointer) {
     assert(!isSigned && "Got signed pointer");
@@ -5245,12 +5254,38 @@ KValue Executor::createNondetValue(ExecutionState &state,
     assert(had && "Already had a unique name");
     (void)had;
 
-    const Array *offarray
+    offarray
         = arrayCache.CreateArray(offName, Context::get().getPointerWidth());
     auto offexpr = Expr::createTempRead(offarray, size);
     kval = {expr, offexpr};
   } else {
     kval = expr;
+  }
+
+  // In seed mode, take the value from the seed (like in executeMakeSymbolic).
+  // Seeds only guide the search, so a missing or shorter input is extended
+  // with zeros. Pointers are always seeded with null.
+  auto found = seedMap.find(&state);
+  if (found != seedMap.end()) {
+    uint64_t bytes = std::max(size / 8, 1U);
+    for (SeedInfo &si : found->second) {
+      std::vector<unsigned char> values(array->size, 0);
+      if (!isPointer) {
+        if (KTestObject *obj = si.getNextInput(name, bytes, NamedSeedMatching,
+                                               StrictNamedSeedMatching)) {
+          if (obj->numBytes > bytes && !AllowSeedTruncation)
+            klee_warning_once(obj, "seed input %s[%u] larger than nondet "
+                              "value %s[%lu], truncating", obj->name,
+                              obj->numBytes, name.c_str(), bytes);
+          memcpy(values.data(), obj->bytes,
+                 std::min<uint64_t>(obj->numBytes, bytes));
+        }
+      }
+      si.assignment.bindings[array] = values;
+      if (offarray)
+        si.assignment.bindings[offarray] =
+            std::vector<unsigned char>(offarray->size, 0);
+    }
   }
 
   auto& nv = state.addNondetValue(kval, isSigned, name);
@@ -5295,7 +5330,7 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
       // In seed mode we need to add this as binding
 
       for (SeedInfo &si : found->second) {
-        KTestObject *obj = si.getNextInput(mo, NamedSeedMatching);
+        KTestObject *obj = si.getNextInput(mo, NamedSeedMatching, StrictNamedSeedMatching);
 
         if (!obj) {
           if (AllowSeedExtension) {
