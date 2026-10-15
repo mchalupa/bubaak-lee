@@ -465,6 +465,23 @@ cl::opt<std::string> TimerInterval(
     cl::cat(TerminationCat));
 
 
+cl::opt<bool> WriteProgress(
+    "write-progress",
+    cl::desc("Periodically append a line with the progress of the search "
+             "(time, covered instructions, states, ...) to the file "
+             "'progress' in the output directory, so that other tools can "
+             "monitor KLEE (default=false)"),
+    cl::init(false),
+    cl::cat(TerminationCat));
+
+cl::opt<std::string> ProgressInterval(
+    "progress-interval",
+    cl::desc("How often to write the progress with --write-progress "
+             "(default=500ms)"),
+    cl::init("500ms"),
+    cl::cat(TerminationCat));
+
+
 /*** Debugging options ***/
 
 /// The different query logging solvers that can switched on/off
@@ -539,6 +556,17 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
         klee_message("HaltTimer invoked");
         setHaltExecution(true);
       }));
+
+  if (WriteProgress) {
+    progressFile = interpreterHandler->openOutputFile("progress");
+    if (!progressFile)
+      klee_error("Unable to open the progress file.");
+    *progressFile << "# time_ms covered_instructions states forks "
+                     "instructions\n";
+    progressFile->flush();
+    timers.add(std::make_unique<Timer>(time::Span{ProgressInterval},
+                                       [&] { writeProgress(); }));
+  }
 
   coreSolverTimeout = time::Span{MaxCoreSolverTime};
   if (coreSolverTimeout) UseForkedCoreSolver = true;
@@ -3803,11 +3831,23 @@ void Executor::doDumpStates() {
   updateStates(nullptr);
 }
 
+void Executor::writeProgress() {
+  *progressFile << (time::getWallTime() - runStartTime).toMicroseconds() / 1000
+                << ' ' << stats::coveredInstructions.getValue() << ' '
+                << states.size() << ' ' << stats::forks.getValue() << ' '
+                << stats::instructions.getValue() << '\n';
+  progressFile->flush();
+}
+
 void Executor::run(ExecutionState &initialState) {
   bindModuleConstants();
 
   // Delay init till now so that ticks don't accrue during optimization and such.
   timers.reset();
+  runStartTime = time::getWallTime();
+  if (WriteProgress && !statsTracker)
+    klee_warning("--write-progress needs statistics, the covered instructions "
+                 "are not counted");
 
   states.insert(&initialState);
 

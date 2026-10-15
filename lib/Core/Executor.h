@@ -203,6 +203,12 @@ private:
   /// File to print executed instructions to
   std::unique_ptr<llvm::raw_ostream> debugInstFile;
 
+  /// File to which the progress is written (--write-progress)
+  std::unique_ptr<llvm::raw_fd_ostream> progressFile;
+
+  /// The time when the execution started
+  time::Point runStartTime;
+
   // @brief Buffer used by logBuffer
   std::string debugBufferString;
 
@@ -552,6 +558,9 @@ private:
 
   void printDebugInstructions(ExecutionState &state);
   void doDumpStates();
+
+  /// Append the current progress to the progress file
+  void writeProgress();
 
   /// Only for debug purposes; enable via debugger or klee-control
   void dumpStates();
