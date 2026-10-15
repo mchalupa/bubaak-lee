@@ -144,6 +144,18 @@ cl::opt<bool> DumpStatesOnHalt(
     cl::desc("Dump test cases for all active states on exit (default=true)"),
     cl::cat(TestGenCat));
 
+cl::opt<bool> WriteIncompleteTests(
+    "write-incomplete-tests",
+    cl::init(false),
+    cl::desc("Generate a test case for every state from which KLEE does not "
+             "explore all paths: states terminated early (e.g., dumped on "
+             "halt), states killed by a solver, user, execution, or external "
+             "call error (for each state, not once per location), and "
+             "branches dropped because forking was inhibited. This is done "
+             "even if -exit-on-error-type is given, unless the execution "
+             "halts because of -exit-on-error-type (default=false)"),
+    cl::cat(TestGenCat));
+
 cl::opt<unsigned> MaxDumpedStates(
     "max-dumped-states",
     cl::init(0),
@@ -1014,6 +1026,7 @@ void Executor::branch(ExecutionState &state,
       if (i == next) {
         result.push_back(&state);
       } else {
+        writeDroppedBranchTest(state, conditions[i]);
         result.push_back(nullptr);
       }
     }
@@ -1190,9 +1203,11 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       if (!branchingPermitted(current)) {
         TimerStatIncrementer timer(stats::forkTime);
         if (theRNG.getBool()) {
+          writeDroppedBranchTest(current, Expr::createIsZero(condition));
           addConstraint(current, condition);
           res = Solver::True;        
         } else {
+          writeDroppedBranchTest(current, condition);
           addConstraint(current, Expr::createIsZero(condition));
           res = Solver::False;
         }
@@ -4286,8 +4301,9 @@ void Executor::terminateStateEarly(ExecutionState &state, const Twine &message,
 
   // with -exit-on-error-type, we generate tests only for errors
   // (unless asked otherwise)
-  bool writeTests = ExitOnErrorType.empty() ||
-                    (DumpStatesUnlessExitOnError && !haltedOnError);
+  bool writeTests =
+      ExitOnErrorType.empty() ||
+      ((DumpStatesUnlessExitOnError || WriteIncompleteTests) && !haltedOnError);
   if (writeTests &&
       ((reason <= StateTerminationType::EXECERR && shouldWriteTest(state)) ||
       (AlwaysOutputSeeds && seedMap.count(&state)))) {
@@ -4357,6 +4373,25 @@ const InstructionInfo & Executor::getLastNonKleeInternalInstruction(const Execut
   return *ii;
 }
 
+/// Is the termination such that the program could continue from the state
+/// (that is, it is not an error of the program)?
+static bool isIncompleteTermination(StateTerminationType reason) {
+  return reason == StateTerminationType::Solver ||
+         (reason > StateTerminationType::PROGERR &&
+          reason <= StateTerminationType::EXECERR);
+}
+
+void Executor::writeDroppedBranchTest(const ExecutionState &state,
+                                      ref<Expr> condition) {
+  if (!WriteIncompleteTests || haltedOnError)
+    return;
+  auto dropped = state.copy();
+  dropped->addConstraint(condition);
+  interpreterHandler->processTestCase(
+      *dropped, "Fork inhibited, the branch is not explored.\n",
+      terminationTypeFileExtension(StateTerminationType::Interrupted).c_str());
+}
+
 bool shouldExitOn(StateTerminationType reason) {
   auto it = std::find(ExitOnErrorType.begin(), ExitOnErrorType.end(), reason);
   return it != ExitOnErrorType.end();
@@ -4411,6 +4446,10 @@ void Executor::terminateStateOnError(ExecutionState &state,
   // for a specific error and this is the error (haltExecution is set to true),
   // or if we do not search for a specific error and we haven't emitted this error yet
   if (EmitAllErrors || haltExecution || (ExitOnErrorType.empty() && notemitted)) {
+    reportError(messaget, state, info, suffix, terminationType);
+  } else if (WriteIncompleteTests && !haltedOnError &&
+             isIncompleteTermination(terminationType)) {
+    // KLEE does not explore the paths that continue from this state
     reportError(messaget, state, info, suffix, terminationType);
   }
 

@@ -344,6 +344,12 @@ public:
 
   ExecutionState *branch();
 
+  /// A temporary copy of the state (e.g., to generate a test for a path
+  /// that is not explored), it is not a new state of the execution
+  std::unique_ptr<ExecutionState> copy() const {
+    return std::unique_ptr<ExecutionState>(new ExecutionState(*this));
+  }
+
   void pushFrame(KInstIterator caller, KFunction *kf);
   void popFrame();
   void removeAlloca(const MemoryObject *mo);

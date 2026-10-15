@@ -562,6 +562,11 @@ private:
   /// Append the current progress to the progress file
   void writeProgress();
 
+  /// With -write-incomplete-tests, write a test for the branch (given by
+  /// `condition`) that is not explored because forking is inhibited
+  void writeDroppedBranchTest(const ExecutionState &state,
+                              ref<Expr> condition);
+
   /// Only for debug purposes; enable via debugger or klee-control
   void dumpStates();
   void dumpExecutionTree();
