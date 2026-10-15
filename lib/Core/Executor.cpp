@@ -312,6 +312,14 @@ cl::opt<bool> StrictNamedSeedMatching(
              "(default=false)."),
     cl::cat(SeedingCat));
 
+cl::opt<bool> DropExhaustedSeeds(
+    "drop-exhausted-seeds",
+    cl::init(false),
+    cl::desc("Stop seeding a state with a seed that has no input for "
+             "a nondet value; the state then continues without the seed "
+             "(default=false)."),
+    cl::cat(SeedingCat));
+
 cl::opt<std::string>
     SeedTime("seed-time",
              cl::desc("Amount of time to dedicate to seeds, before normal "
@@ -5264,15 +5272,20 @@ KValue Executor::createNondetValue(ExecutionState &state,
 
   // In seed mode, take the value from the seed (like in executeMakeSymbolic).
   // Seeds only guide the search, so a missing or shorter input is extended
-  // with zeros. Pointers are always seeded with null.
+  // with zeros, or, with -drop-exhausted-seeds, a seed without the input
+  // stops guiding the state. Pointers are always seeded with null.
   auto found = seedMap.find(&state);
   if (found != seedMap.end()) {
     uint64_t bytes = std::max(size / 8, 1U);
+    std::vector<SeedInfo> kept;
     for (SeedInfo &si : found->second) {
       std::vector<unsigned char> values(array->size, 0);
       if (!isPointer) {
-        if (KTestObject *obj = si.getNextInput(name, bytes, NamedSeedMatching,
-                                               StrictNamedSeedMatching)) {
+        KTestObject *obj = si.getNextInput(name, bytes, NamedSeedMatching,
+                                           StrictNamedSeedMatching);
+        if (!obj && DropExhaustedSeeds)
+          continue;
+        if (obj) {
           if (obj->numBytes > bytes && !AllowSeedTruncation)
             klee_warning_once(obj, "seed input %s[%u] larger than nondet "
                               "value %s[%lu], truncating", obj->name,
@@ -5285,7 +5298,12 @@ KValue Executor::createNondetValue(ExecutionState &state,
       if (offarray)
         si.assignment.bindings[offarray] =
             std::vector<unsigned char>(offarray->size, 0);
+      kept.push_back(std::move(si));
     }
+    if (kept.empty())
+      seedMap.erase(found);
+    else
+      found->second = std::move(kept);
   }
 
   auto& nv = state.addNondetValue(kval, isSigned, name);
