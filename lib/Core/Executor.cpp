@@ -144,6 +144,15 @@ cl::opt<bool> DumpStatesOnHalt(
     cl::desc("Dump test cases for all active states on exit (default=true)"),
     cl::cat(TestGenCat));
 
+cl::opt<bool> DumpStatesUnlessExitOnError(
+    "dump-states-unless-exit-on-error",
+    cl::init(false),
+    cl::desc("Generate test cases for early terminated states (e.g., the "
+             "states dumped on halt) even if -exit-on-error-type is given, "
+             "unless the execution halts because of -exit-on-error-type "
+             "(default=false)"),
+    cl::cat(TestGenCat));
+
 cl::opt<bool> OnlyOutputStatesCoveringNew(
     "only-output-states-covering-new",
     cl::init(false),
@@ -504,7 +513,7 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
       externalDispatcher(new ExternalDispatcher(ctx)), statsTracker(0),
       pathWriter(0), symPathWriter(0), specialFunctionHandler(0), timers{time::Span(TimerInterval)},
       replayKTest(0), replayPath(0), usingSeeds(0),
-      atMemoryLimit(false), inhibitForking(false), haltExecution(false),
+      atMemoryLimit(false), inhibitForking(false), haltExecution(false), haltedOnError(false),
       ivcEnabled(false), debugLogBuffer(debugBufferString) {
 
 
@@ -4192,7 +4201,11 @@ void Executor::terminateStateEarly(ExecutionState &state, const Twine &message,
     ++stats::terminationEarly;
   }
 
-  if (ExitOnErrorType.empty() &&
+  // with -exit-on-error-type, we generate tests only for errors
+  // (unless asked otherwise)
+  bool writeTests = ExitOnErrorType.empty() ||
+                    (DumpStatesUnlessExitOnError && !haltedOnError);
+  if (writeTests &&
       ((reason <= StateTerminationType::EXECERR && shouldWriteTest(state)) ||
       (AlwaysOutputSeeds && seedMap.count(&state)))) {
     interpreterHandler->processTestCase(
@@ -4291,12 +4304,12 @@ void Executor::terminateStateOnError(ExecutionState &state,
         reportError(message, state, info, suffix, terminationType);
       }
       if (shouldExitOn(StateTerminationType::Leak))
-        haltExecution = true;
+        haltExecution = haltedOnError = true;
     }
   }
 
   if (shouldExitOn(terminationType))
-    haltExecution = true;
+    haltExecution = haltedOnError = true;
 
   bool notemitted = emittedErrors.insert(std::make_pair(lastInst, message)).second;
 

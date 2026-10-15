@@ -183,6 +183,9 @@ private:
   /// step.
   bool haltExecution;  
 
+  /// Whether the execution was halted because of -exit-on-error-type
+  bool haltedOnError;
+
   /// Whether implied-value concretization is enabled. Currently
   /// false, it is buggy (it needs to validate its writes).
   bool ivcEnabled;
