@@ -13,6 +13,7 @@
 #include "klee/ADT/TreeStream.h"
 #include "klee/Config/Version.h"
 #include "klee/Core/Interpreter.h"
+#include "klee/Module/KInstruction.h"
 #include "klee/Expr/Expr.h"
 #include "klee/Solver/SolverCmdLine.h"
 #include "klee/Statistics/Statistics.h"
@@ -67,6 +68,7 @@ DISABLE_WARNING_POP
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <optional>
 #include <sstream>
 
 using namespace llvm;
@@ -115,6 +117,16 @@ namespace {
   cl::opt<bool>
   WriteWitness("write-witness",
             cl::desc("Write .graphml files in the SV-COMP format (default=false)"),
+            cl::cat(TestCaseCat));
+
+  cl::opt<bool>
+  WriteWitnessYAML("write-witness-yaml",
+            cl::desc("Write .witness.yml files with violation witnesses in the "
+                     "SV-COMP witness format 2.0. The metadata are incomplete "
+                     "(no information about the task) and the column of a "
+                     "function_return waypoint is the column of the call, not "
+                     "of its right parenthesis. The witness must be completed "
+                     "by the caller (default=false)"),
             cl::cat(TestCaseCat));
 
   cl::opt<bool>
@@ -401,6 +413,7 @@ public:
       const std::vector<std::pair<std::string, std::vector<unsigned char>>>
           &out,
       unsigned id);
+  void writeWitnessYAML(const ExecutionState &state, unsigned id);
   void writeTestCaseXML(
       bool isError,
       const std::vector<std::pair<std::string, std::vector<unsigned char>>>
@@ -742,6 +755,200 @@ std::string KleeHandler::dumpPath(const ExecutionState& state) {
 }
 
 
+namespace {
+// a program location used in a YAML witness
+struct WitnessLocation {
+  std::string file;
+  unsigned line{0};
+  unsigned column{0};
+  std::string function;
+};
+
+std::string yamlQuote(const std::string &str) {
+  std::string res = "\"";
+  for (char c : str) {
+    if (c == '"' || c == '\\')
+      res += '\\';
+    if (c == '\n') {
+      res += "\\n";
+      continue;
+    }
+    res += c;
+  }
+  return res + "\"";
+}
+
+std::string getFullPath(llvm::StringRef dir, llvm::StringRef file) {
+  if (file.empty() || file[0] == '/' || dir.empty())
+    return file.str();
+  return (dir + "/" + file).str();
+}
+
+std::string getFullPath(const llvm::DILocation *loc) {
+  return getFullPath(loc->getDirectory(), loc->getFilename());
+}
+
+WitnessLocation toWitnessLocation(const llvm::DILocation *loc) {
+  WitnessLocation wl;
+  wl.file = getFullPath(loc);
+  wl.line = loc->getLine();
+  wl.column = loc->getColumn();
+  if (auto *sp = loc->getScope()->getSubprogram())
+    wl.function = sp->getName().str();
+  return wl;
+}
+
+// the file with the definition of main, the locations in the witness
+// must be in this file
+std::string getMainFile(const llvm::Module *M) {
+  if (!M)
+    return "";
+  auto *F = M->getFunction("main");
+  if (!F || !F->getSubprogram())
+    return "";
+  auto *sp = F->getSubprogram();
+  return getFullPath(sp->getDirectory(), sp->getFilename());
+}
+
+std::string getErrorFunName() {
+  auto &opts = llvm::cl::getRegisteredOptions();
+  auto it = opts.find("error-fn");
+  if (it == opts.end())
+    return "";
+  return static_cast<llvm::cl::opt<std::string> *>(it->second)->getValue();
+}
+
+bool isErrorFunction(llvm::StringRef name, const std::string &errorFn) {
+  return name == "__assert_fail" || name == "__VERIFIER_error" ||
+         (!errorFn.empty() && name == errorFn);
+}
+
+// the location of the instruction followed by the locations of the call
+// sites of the functions into which the instruction was inlined
+void addInlinedLocations(const llvm::Instruction *inst,
+                         std::vector<const llvm::DILocation *> &out) {
+  if (!inst)
+    return;
+  for (const llvm::DILocation *loc = inst->getDebugLoc().get(); loc;
+       loc = loc->getInlinedAt())
+    out.push_back(loc);
+}
+
+// Get the location of the violation that we can put into the target
+// waypoint: the innermost location on the call stack that is in the main file
+// and not inside an error function (for unreach-call, the target is the call
+// of the error function, not the code inside).
+std::optional<WitnessLocation>
+getViolationLocation(const ExecutionState &state, const std::string &mainFile) {
+  std::vector<const llvm::DILocation *> candidates;
+  if (state.prevPC)
+    addInlinedLocations(state.prevPC->inst, candidates);
+  for (auto it = state.stack.rbegin(), et = state.stack.rend(); it != et; ++it) {
+    if (it->caller)
+      addInlinedLocations(it->caller->inst, candidates);
+  }
+
+  const auto errorFn = getErrorFunName();
+  for (const auto *loc : candidates) {
+    if (loc->getLine() == 0)
+      continue;
+    auto *sp = loc->getScope()->getSubprogram();
+    if (sp && isErrorFunction(sp->getName(), errorFn))
+      continue;
+    if (!mainFile.empty() && getFullPath(loc) != mainFile)
+      continue;
+    return toWitnessLocation(loc);
+  }
+  return std::nullopt;
+}
+
+void writeWitnessLocation(llvm::raw_ostream &out, const WitnessLocation &loc) {
+  out << "        location:\n"
+         "          file_name: " << yamlQuote(loc.file) << "\n"
+         "          line: " << loc.line << "\n";
+  if (loc.column > 0)
+    out << "          column: " << loc.column << "\n";
+  if (!loc.function.empty())
+    out << "          function: " << yamlQuote(loc.function) << "\n";
+}
+
+bool isFloatNondet(const std::string &name) {
+  return name.find("float") != std::string::npos ||
+         name.find("double") != std::string::npos;
+}
+} // namespace
+
+/// Write a violation witness in the SV-COMP format 2.0: the sequence of
+/// return values of __VERIFIER_nondet_* calls followed by the target.
+void KleeHandler::writeWitnessYAML(const ExecutionState &state, unsigned id) {
+  // non-termination is witnessed by a cycle, which is supported only by the
+  // GraphML witnesses
+  if (state.lastLoopHead || state.lastLoopFail)
+    return;
+
+  const auto mainFile = getMainFile(getModule());
+  auto target = getViolationLocation(state, mainFile);
+  if (!target) {
+    klee_warning("unable to find the location of the violation, "
+                 "not writing the YAML witness");
+    return;
+  }
+
+  auto witness = openTestFile("witness.yml", id);
+  if (!witness) {
+    klee_warning("unable to write YAML witness file, losing it");
+    return;
+  }
+
+  std::string version = PACKAGE_STRING;
+  if (version.compare(0, 5, "KLEE ") == 0)
+    version = version.substr(5);
+
+  auto &out = *witness;
+  out << "- entry_type: violation_sequence\n"
+         "  metadata:\n"
+         "    format_version: '2.0'\n"
+         "    producer:\n"
+         "      name: KLEE\n"
+         "      version: " << yamlQuote(version) << "\n"
+         "  content:\n";
+
+  auto testvec = m_interpreter->getTestVector(state);
+  assert(testvec.size() == state.nondetValues.size());
+  for (size_t i = 0; i < testvec.size(); ++i) {
+    const auto &input = testvec[i];
+    const auto &name = input.getName();
+    if (name.compare(0, 17, "__VERIFIER_nondet") != 0)
+      continue;
+    // we cannot express these in the constraint (or not reliably)
+    if (input.isPointer() || isFloatNondet(name))
+      continue;
+    auto *ki = state.nondetValues[i].kinstruction;
+    if (!ki)
+      continue;
+    const llvm::DILocation *loc = ki->inst->getDebugLoc().get();
+    if (!loc || loc->getLine() == 0)
+      continue;
+    if (!mainFile.empty() && getFullPath(loc) != mainFile)
+      continue;
+
+    out << "  - segment:\n"
+           "    - waypoint:\n"
+           "        type: function_return\n"
+           "        action: follow\n"
+           "        constraint:\n"
+           "          format: acsl_expression\n"
+           "          value: '\\result == " << input.toString() << "'\n";
+    writeWitnessLocation(out, toWitnessLocation(loc));
+  }
+
+  out << "  - segment:\n"
+         "    - waypoint:\n"
+         "        type: target\n"
+         "        action: follow\n";
+  writeWitnessLocation(out, *target);
+}
+
 /* Outputs all files (.ktest, .kquery, .cov etc.) describing a test case */
 void KleeHandler::processTestCase(const ExecutionState &state,
                                   const char *errorMessage,
@@ -919,6 +1126,10 @@ void KleeHandler::processTestCase(const ExecutionState &state,
       } else {
         klee_warning("unable to write witness file, losing it");
       }
+    }
+
+    if (WriteWitnessYAML && errorMessage) {
+      writeWitnessYAML(state, test_id);
     }
 
     if (WriteHarness) {
