@@ -114,6 +114,16 @@ Z3SolverImpl::Z3SolverImpl()
   Z3_params_inc_ref(builder->ctx, solverParameters);
   timeoutParamStrSymbol = Z3_mk_string_symbol(builder->ctx, "timeout");
   setCoreSolverTimeout(timeout);
+  // Do not let Z3 handle SIGINT. By default, Z3_solver_check() installs its
+  // own SIGINT handler for the duration of the check and cancels the running
+  // query when the signal arrives (and then passes the signal on to KLEE's
+  // handler). Ctrl-C (SIGINT) is how KLEE is asked to halt and write tests for
+  // the (unfinished) states. A query interrupted this way fails, e.g., while
+  // a test case is being generated, which makes KLEE abort ("Unhandled solver
+  // failure") or kill the state, so the tests are lost. KLEE's own handler
+  // just sets the halt flag and the current query finishes normally.
+  Z3_params_set_bool(builder->ctx, solverParameters,
+                     Z3_mk_string_symbol(builder->ctx, "ctrl_c"), false);
 
   if (!Z3QueryDumpFile.empty()) {
     std::string error;
