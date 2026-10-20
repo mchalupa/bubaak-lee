@@ -115,6 +115,11 @@ extern "C" {
   void klee_assume(uintptr_t condition);
   void klee_warning(const char *message);
   void klee_warning_once(const char *message);
+  /* A model of a function (named by the argument) explores only a subset of
+   * the behaviors of the function (prints, once per name,
+   * "KLEE: WARNING: under-approximation: NAME"), so the exploration of all
+   * paths does not prove the absence of errors */
+  void klee_report_under_approximation(const char *name);
   void klee_prefer_cex(void *object, uintptr_t condition);
   void klee_posix_prefer_cex(void *object, uintptr_t condition);
   void klee_mark_global(void *object);

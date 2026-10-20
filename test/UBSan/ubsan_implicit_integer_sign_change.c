@@ -7,7 +7,7 @@
 #include "klee/klee.h"
 
 signed int convert_unsigned_int_to_signed_int(unsigned int x) {
-  // CHECK: KLEE: ERROR: {{.*}}runtime/Sanitizer/ubsan/ubsan_handlers.cpp:{{[0-9]+}}: implicit-integer-sign-change
+  // CHECK: KLEE: ERROR: {{.*}}ubsan_implicit_integer_sign_change.c:{{[0-9]+}}: implicit-integer-sign-change
   return x;
 }
 

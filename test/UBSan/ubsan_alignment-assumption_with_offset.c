@@ -14,7 +14,7 @@ int main() {
 
   char *ptr = (char *)address;
 
-  // CHECK: KLEE: ERROR: {{.*}}runtime/Sanitizer/ubsan/ubsan_handlers.cpp:{{[0-9]+}}: alignment-assumption
+  // CHECK: KLEE: ERROR: {{.*}}ubsan_alignment-assumption_with_offset.c:{{[0-9]+}}: alignment-assumption
   __builtin_assume_aligned(ptr, 0x8000, 1);
 
   return 0;

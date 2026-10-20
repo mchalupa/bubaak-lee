@@ -80,6 +80,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <dlfcn.h>
 #include <cassert>
 #include <cerrno>
 #include <cinttypes>
@@ -641,6 +642,14 @@ Executor::setModule(std::vector<std::unique_ptr<llvm::Module>> &modules,
 
   kmodule = std::unique_ptr<KModule>(new KModule());
 
+  // The functions defined in the program (the first module), all the other
+  // functions come from KLEE's runtime libraries (see below)
+  std::set<std::string> programFunctions;
+  for (const auto &F : *modules[0]) {
+    if (!F.isDeclaration())
+      programFunctions.insert(F.getName().str());
+  }
+
   // Preparing the final module happens in multiple stages
 
   // Link with KLEE intrinsics library before running any optimizations
@@ -676,6 +685,14 @@ Executor::setModule(std::vector<std::unique_ptr<llvm::Module>> &modules,
 
   kmodule->optimiseAndPrepare(opts, preservedFunctions);
   kmodule->checkModule();
+
+  // The functions that are not from the program (the libc models, the UBSan
+  // handlers, the intrinsics, ...) are KLEE internal: errors inside them are
+  // reported at the location of their call in the program
+  for (const auto &F : *kmodule->module) {
+    if (!F.isDeclaration() && programFunctions.count(F.getName().str()) == 0)
+      kmodule->internalFunctions.insert(&F);
+  }
 
   // 4.) Manifest the module
   kmodule->manifest(interpreterHandler, StatsTracker::useStatistics());
@@ -4344,45 +4361,26 @@ void Executor::terminateStateEarlyUser(ExecutionState &state,
 
 const InstructionInfo & Executor::getLastNonKleeInternalInstruction(const ExecutionState &state,
     Instruction ** lastInstruction) {
-  // unroll the stack of the applications state and find
-  // the last instruction which is not inside a KLEE internal function
-  ExecutionState::stack_ty::const_reverse_iterator it = state.stack.rbegin(),
-      itE = state.stack.rend();
-
-  // don't check beyond the outermost function (i.e. main())
-  itE--;
-
-  const InstructionInfo * ii = 0;
-  if (kmodule->internalFunctions.count(it->kf->function) == 0){
-    ii =  state.prevPC->info;
-    *lastInstruction = state.prevPC->inst;
-    //  Cannot return yet because even though
-    //  it->function is not an internal function it might of
-    //  been called from an internal function.
-  }
-
-  // Wind up the stack and check if we are in a KLEE internal function.
-  // We visit the entire stack because we want to return a CallInstruction
-  // that was not reached via any KLEE internal functions.
-  for (;it != itE; ++it) {
-    // check calling instruction and if it is contained in a KLEE internal function
-    const Function * f = (*it->caller).inst->getParent()->getParent();
-    if (kmodule->internalFunctions.count(f)){
-      ii = 0;
-      continue;
+  // Find the innermost instruction on the stack that is not inside a KLEE
+  // internal function (a function of KLEE's runtime, e.g., the libc models
+  // memcpy or strcpy, or the UBSan handlers): the current instruction if the
+  // current function is not internal, otherwise the call in the innermost
+  // caller that is not internal (the call of the runtime function from the
+  // program). Errors found inside the runtime are reported at this location.
+  const KInstruction *ki = state.prevPC;
+  for (auto it = state.stack.rbegin(), ie = state.stack.rend();
+       ki && it != ie; ++it) {
+    if (kmodule->internalFunctions.count(it->kf->function) == 0) {
+      *lastInstruction = ki->inst;
+      return *ki->info;
     }
-    if (!ii){
-      ii = (*it->caller).info;
-      *lastInstruction = (*it->caller).inst;
-    }
+    // continue with the caller of this function
+    ki = it->caller;
   }
 
-  if (!ii) {
-    // something went wrong, play safe and return the current instruction info
-    *lastInstruction = state.prevPC->inst;
-    return *state.prevPC->info;
-  }
-  return *ii;
+  // something went wrong, play safe and return the current instruction info
+  *lastInstruction = state.prevPC->inst;
+  return *state.prevPC->info;
 }
 
 /// Is the termination such that the program could continue from the state
@@ -4507,6 +4505,9 @@ void Executor::terminateStateOnUserError(ExecutionState &state,
 
 // XXX shoot me
 static const char *okExternalsList[] = { "printf",
+                                         "fputs",
+                                         "fputc",
+                                         "putc",
                                          "fprintf",
                                          "sscanf",
                                          "snprintf",
@@ -4617,6 +4618,247 @@ static std::set<std::string> nokExternals({"fesetround", "fesetenv",
                                            "__freading", "__fwriting", "fread", "fread_unlocked",
                                            "strspn", "strtod"});
 
+// The functions that only print (they do not change the state of the program,
+// except %n of printf).
+static const std::set<std::string> outputExternals({"printf", "fprintf", "puts",
+                                                    "putchar", "fputs", "fputc",
+                                                    "putc"});
+
+// The functions that print wide strings (they are not executed natively)
+static const std::set<std::string> wideOutputExternals(
+    {"wprintf", "fwprintf", "putwchar", "fputwc", "putwc", "fputws"});
+
+// Is this a call with a symbolic scalar argument (and only concrete
+// pointers)?
+static bool hasSymbolicScalarsOnly(const std::vector<Cell> &arguments) {
+  bool symbolic = false;
+  for (const auto &arg : arguments) {
+    if (!isa<klee::ConstantExpr>(arg.getSegment()))
+      return false;
+    if (isa<klee::ConstantExpr>(arg.getValue()))
+      continue;
+    if (!arg.getSegment()->isZero())
+      return false; // a pointer with a symbolic offset
+    symbolic = true;
+  }
+  return symbolic;
+}
+
+namespace {
+cl::opt<bool> FailUnmodelledLibcCalls(
+    "fail-unmodelled-libc-calls", cl::init(true),
+    cl::desc("With --external-calls=pure, terminate the path (as a failed "
+             "external call) on a call of a function of the C library that "
+             "has no model, instead of assuming it is pure (its result "
+             "would not be a real one) (default=true)"),
+    cl::cat(ExtCallsCat));
+} // namespace
+
+// Is the function a function of the C library (exported by the C or the math
+// library of the host)? Calls of other undefined functions are pure by the
+// convention of SV-COMP (no side effects, any return value), but the
+// semantics of the functions of the C library is known.
+static bool isLibcFunction(const std::string &name) {
+  static void *libs[] = {dlopen("libc.so.6", RTLD_LAZY | RTLD_LOCAL),
+                         dlopen("libm.so.6", RTLD_LAZY | RTLD_LOCAL)};
+  for (void *lib : libs) {
+    if (lib && dlsym(lib, name.c_str()))
+      return true;
+  }
+  return false;
+}
+
+// Does the object have a symbolic byte? (Big objects are not checked and
+// taken as symbolic.)
+static bool hasSymbolicBytes(const ObjectState *os, uint64_t size) {
+  if (size > (1u << 16))
+    return true;
+  for (uint64_t i = 0; i < size; ++i) {
+    KValue byte = os->read8(i);
+    if (!isa<klee::ConstantExpr>(byte.getValue()) ||
+        !isa<klee::ConstantExpr>(byte.getSegment()))
+      return true;
+  }
+  return false;
+}
+
+// Report (once per function) that the behaviors of a function were not
+// explored completely (a model that explores only some of them, a function
+// of the C library that is assumed to be pure, or an external call whose
+// memory accesses are not checked): exploring all paths does not prove the
+// absence of errors anymore.
+void Executor::reportUnderApproximation(const std::string &name) {
+  static std::set<std::string> reported;
+  if (reported.insert(name).second)
+    klee_warning("under-approximation: %s", name.c_str());
+}
+
+Executor::StringCheck Executor::checkString(ExecutionState &state,
+                                            const Cell &address,
+                                            std::string *contents,
+                                            bool &concrete) {
+  concrete = false;
+  auto segment = toUnique(state, address.getSegment());
+  auto offsetExpr = toUnique(state, address.getOffset());
+  if (!isa<ConstantExpr>(segment) || !isa<ConstantExpr>(offsetExpr))
+    return StringCheck::Unknown;
+  if (cast<ConstantExpr>(segment)->isZero())
+    return StringCheck::Unknown; // null or an integer, not an object
+
+  ObjectPair op;
+  KValue pointer(segment, offsetExpr);
+  if (!state.addressSpace.resolveOneConstantSegment(pointer, op))
+    return StringCheck::Unknown;
+  const MemoryObject *mo = op.first;
+  const ObjectState *os = op.second;
+  ref<Expr> sizeExpr = mo->size;
+  ref<Expr> offExpr = mo->getOffsetExpr(pointer.getOffset());
+  auto *sizeCE = dyn_cast<ConstantExpr>(sizeExpr);
+  auto *offCE = dyn_cast<ConstantExpr>(offExpr);
+  if (!sizeCE || !offCE)
+    return StringCheck::Unknown;
+  uint64_t size = sizeCE->getZExtValue();
+  uint64_t offset = offCE->getZExtValue();
+  if (offset >= size)
+    return StringCheck::Unterminated;
+
+  std::string str;
+  bool symbolic = false;
+  ref<Expr> someZero = ConstantExpr::alloc(0, Expr::Bool);
+  for (uint64_t i = offset; i < size; ++i) {
+    ref<Expr> byte = os->read8(i).getValue();
+    if (auto *ce = dyn_cast<ConstantExpr>(byte)) {
+      if (ce->isZero()) {
+        if (!symbolic) {
+          concrete = true;
+          if (contents)
+            *contents = str;
+        }
+        return StringCheck::Terminated;
+      }
+      str += static_cast<char>(ce->getZExtValue(8));
+    } else {
+      symbolic = true;
+      someZero = OrExpr::create(someZero, Expr::createIsZero(byte));
+    }
+  }
+  if (!symbolic)
+    return StringCheck::Unterminated;
+  // is there a zero byte on all paths?
+  bool mustTerminate = false;
+  if (solver->mustBeTrue(state.constraints, someZero, mustTerminate,
+                         state.queryMetaData) &&
+      mustTerminate)
+    return StringCheck::Terminated;
+  return StringCheck::Unknown;
+}
+
+bool Executor::checkOutputCall(ExecutionState &state, const std::string &name,
+                               const std::vector<Cell> &arguments,
+                               bool &hasWrite, bool &unknown,
+                               bool &symbolicContents) {
+  hasWrite = false;
+  unknown = false;
+  symbolicContents = false;
+  bool unterminated = false;
+
+  auto check = [&](unsigned idx, std::string *contents) -> bool {
+    bool concrete;
+    if (idx >= arguments.size()) {
+      unknown = true;
+      return true;
+    }
+    switch (checkString(state, arguments[idx], contents, concrete)) {
+    case StringCheck::Terminated:
+      if (!concrete) {
+        if (contents)
+          unknown = true; // we need the contents
+        symbolicContents = true;
+      }
+      return true;
+    case StringCheck::Unknown:
+      unknown = true;
+      return true;
+    case StringCheck::Unterminated:
+      // The reads of the printing functions are not checked (the reference
+      // verdicts of SV-COMP do not count them), but the string cannot be
+      // printed natively (the function would read out of the object)
+      unterminated = true;
+      return true;
+    }
+    return true;
+  };
+
+  if (name == "putchar" || name == "fputc" || name == "putc")
+    return true;
+  if (name == "puts" || name == "fputs") {
+    check(0, nullptr);
+    if (unterminated)
+      symbolicContents = true;
+    return true;
+  }
+
+  // printf, fprintf
+  unsigned fmtIdx = name == "fprintf" ? 1 : 0;
+  std::string fmt;
+  if (!check(fmtIdx, &fmt))
+    return false;
+  if (unknown)
+    return true; // the format is not known, we cannot check the arguments
+
+  unsigned arg = fmtIdx + 1;
+  for (size_t i = 0; i < fmt.size(); ++i) {
+    if (fmt[i] != '%')
+      continue;
+    ++i;
+    if (i < fmt.size() && fmt[i] == '%')
+      continue;
+    // flags, width, precision
+    bool hasPrecision = false;
+    while (i < fmt.size() && strchr("-+ #0'", fmt[i]))
+      ++i;
+    while (i < fmt.size() && (isdigit(fmt[i]) || fmt[i] == '*' ||
+                              fmt[i] == '.' || fmt[i] == '$')) {
+      if (fmt[i] == '$') {
+        unknown = true; // positional arguments
+        return true;
+      }
+      if (fmt[i] == '.')
+        hasPrecision = true;
+      if (fmt[i] == '*')
+        ++arg;
+      ++i;
+    }
+    bool wide = false;
+    while (i < fmt.size() && strchr("hlLqjzt", fmt[i])) {
+      if (fmt[i] == 'l')
+        wide = true;
+      ++i;
+    }
+    if (i >= fmt.size())
+      break;
+    char conv = fmt[i];
+    if (conv == 'n') {
+      hasWrite = true;
+    } else if (conv == 's' || conv == 'S') {
+      if (wide || conv == 'S' || hasPrecision) {
+        // wide strings or a bounded read: not checked
+        unknown = true;
+      } else if (!check(arg, nullptr)) {
+        return false;
+      }
+    } else if (!strchr("diouxXeEfFgGaAcCp", conv)) {
+      unknown = true; // an unknown conversion
+      return true;
+    }
+    ++arg;
+  }
+  // an unterminated string is not printed (as a symbolic one)
+  if (unterminated)
+    symbolicContents = true;
+  return true;
+}
+
 void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
                                     KCallable *callable,
                                     const std::vector<Cell> &arguments) {
@@ -4641,8 +4883,57 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
     return;
   }
 
+  const std::string name = callable->getName().str();
+
+  // The printing functions: check the memory that they read. If they print
+  // symbolic values and their result is not used, skip them (the printing
+  // does not change the state of the program), otherwise they are executed
+  // natively (with concrete arguments).
+  bool skipOutput = false;
+  bool checkedOutput = false;
   if (ExternalCalls == ExternalCallPolicy::Pure &&
-      !okExternals.count(callable->getName().str())) {
+      outputExternals.count(name) > 0) {
+    bool hasWrite, unknown, symbolicContents;
+    if (!checkOutputCall(state, name, arguments, hasWrite, unknown,
+                         symbolicContents))
+      return;
+    checkedOutput = !unknown && !hasWrite;
+    if (checkedOutput &&
+        (symbolicContents || hasSymbolicScalarsOnly(arguments))) {
+      if (!target->inst->use_empty()) {
+        // the result depends on the symbolic values
+        terminateStateOnError(state,
+                              "failed external call: " + name +
+                                  " (the result of printing symbolic values)",
+                              StateTerminationType::External);
+        return;
+      }
+      skipOutput = true;
+    }
+  }
+
+  if (ExternalCalls == ExternalCallPolicy::Pure &&
+      (!okExternals.count(name) || skipOutput)) {
+    // The functions of the program that are not defined are pure (no side
+    // effects, any return value), but a function of the C library has a
+    // known semantics, which is not modelled
+    if (!skipOutput) {
+      if (auto *iasm = dyn_cast<InlineAsm>(callable->getValue())) {
+        if (!iasm->getAsmString().empty())
+          reportUnderApproximation("inline assembly");
+      } else if (wideOutputExternals.count(name) > 0 &&
+                 target->inst->use_empty()) {
+        // printing wide strings without using the result: no effect on the
+        // program (the conversion %n is not checked)
+      } else if (isLibcFunction(name)) {
+        reportUnderApproximation(name);
+        if (FailUnmodelledLibcCalls) {
+          terminateStateOnError(state, "failed external call: " + name,
+                                StateTerminationType::External);
+          return;
+        }
+      }
+    }
     Type *retTy = nullptr;
     if (auto *iasm = dyn_cast<InlineAsm>(callable->getValue())) {
         retTy = iasm->getFunctionType()->getReturnType();
@@ -4698,6 +4989,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   memset(args, 0, allocatedBytes);
   unsigned wordIndex = 2;
   SegmentAddressMap resolvedMOs;
+  bool symbolicMemory = false;
 
   // Real process memory is allocated only transiently, for the duration of this
   // external call. This guard frees every buffer we allocate below and drops
@@ -4800,6 +5092,9 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
           }
 
           resolvedMOs.insert({op.first->segment, address});
+          if (!symbolicMemory &&
+              hasSymbolicBytes(op.second, op.first->allocatedSize))
+            symbolicMemory = true;
 
           if (op.second->getSizeBound() == 0 ||
               (op.second->getSizeBound() > op.first->allocatedSize)) {
@@ -4837,6 +5132,22 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
                                       callable->getName());
         return;
       }
+    }
+  }
+
+  // The function accesses the memory of the program without checks (and
+  // sees only the concrete parts of it)
+  if (ExternalCalls == ExternalCallPolicy::Pure && !resolvedMOs.empty() &&
+      !checkedOutput) {
+    reportUnderApproximation(callable->getName().str());
+    if (symbolicMemory) {
+      // the function would compute with the concrete store instead of the
+      // symbolic values, the results would not be real
+      terminateStateOnError(state,
+                            "failed external call: " + callable->getName() +
+                                " (symbolic memory)",
+                            StateTerminationType::External);
+      return;
     }
   }
 

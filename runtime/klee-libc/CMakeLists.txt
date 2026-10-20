@@ -22,7 +22,6 @@ set(SRC_FILES
         htonl.c
         memchr.c
         mempcpy.c
-        putchar.c
         stpcpy.c
         strcat.c
         strchr.c
@@ -43,6 +42,16 @@ set(SRC_FILES
         toupper.c
         errno.c
 	getenv.c
+        input.c
+        rand.c
+        scanf.c
+        socket.c
+        strspn.c
+        snprintf.c
+        strdup.c
+        strncat.c
+        strstr.c
+        wchar.c
         )
 
 # Add __NO_INLINE__ to prevent glibc from using inline definitions of some

@@ -12,7 +12,7 @@ int main() {
 
   klee_make_symbolic(&x, sizeof(x), "x");
 
-  // CHECK: KLEE: ERROR: {{.*}}runtime/Sanitizer/ubsan/ubsan_handlers.cpp:{{[0-9]+}}: load invalid value
+  // CHECK: KLEE: ERROR: {{.*}}ubsan_bool.c:{{[0-9]+}}: load invalid value
   result = *(_Bool *)&x;
 
   return 0;

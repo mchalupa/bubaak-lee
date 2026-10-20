@@ -16,7 +16,7 @@ int main() {
 
   char *ptr = (char *)address;
 
-  // CHECK: KLEE: ERROR: {{.*}}runtime/Sanitizer/ubsan/ubsan_handlers.cpp:{{[0-9]+}}: nullptr-with-nonzero-offset
+  // CHECK: KLEE: ERROR: {{.*}}ubsan_pointer_overflow-applying_nonzero_offset_to_null_pointer.c:{{[0-9]+}}: nullptr-with-nonzero-offset
   result = ptr + 1;
   return 0;
 }

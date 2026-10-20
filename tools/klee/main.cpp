@@ -1117,7 +1117,19 @@ void KleeHandler::processTestCase(const ExecutionState &state,
           *witness << "<node id=\""<< node + 1 << "\">\n"
                       "  <data key=\"violation\">true</data>\n"
                       "</node>\n";
-          *witness << "<edge source=\"" << node <<"\" target=\"" << node + 1<< "\"/>\n";
+          // the edge to the violation is the location of the error in the
+          // program (not inside KLEE's runtime)
+          auto target = errorMessage
+                            ? getViolationLocation(state, getMainFile(getModule()))
+                            : std::nullopt;
+          if (target) {
+            *witness << "<edge source=\"" << node << "\" target=\"" << node + 1
+                     << "\">\n"
+                        "  <data key=\"startline\">" << target->line << "</data>\n"
+                        "</edge>\n";
+          } else {
+            *witness << "<edge source=\"" << node <<"\" target=\"" << node + 1<< "\"/>\n";
+          }
         }
 
         *witness << "</graph>\n"

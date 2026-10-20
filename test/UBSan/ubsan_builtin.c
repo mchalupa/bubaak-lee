@@ -14,7 +14,7 @@ int main() {
 
   klee_make_symbolic(&x, sizeof(x), "x");
 
-  // CHECK: KLEE: ERROR: {{.*}}runtime/Sanitizer/ubsan/ubsan_handlers.cpp:{{[0-9]+}}: invalid-builtin-use
+  // CHECK: KLEE: ERROR: {{.*}}ubsan_builtin.c:{{[0-9]+}}: invalid-builtin-use
   __builtin_ctz(x);
   return 0;
 }

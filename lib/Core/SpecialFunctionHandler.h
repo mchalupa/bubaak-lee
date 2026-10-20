@@ -132,6 +132,7 @@ namespace klee {
     HANDLER(handleUnderConstrained);
     HANDLER(handleWarning);
     HANDLER(handleWarningOnce);
+    HANDLER(handleReportUnderApproximation);
     HANDLER(handleScopeEnter);
     HANDLER(handleScopeLeave);
     HANDLER(handleVerifierNondetInt);
@@ -157,8 +158,6 @@ namespace klee {
     HANDLER(handlePthreadCreate);
     HANDLER(handlePthreadJoin);
     HANDLER(handleUnsupportedPthread);
-    HANDLER(handleScanf);
-    HANDLER(handleFscanf);
 #undef HANDLER
   };
 } // End klee namespace

@@ -13,7 +13,7 @@ int main() {
   char c[] __attribute__((aligned(8))) = {0, 0, 0, 0, 1, 2, 3, 4, 5};
   int *p = (int *)&c[x];
 
-  // CHECK: KLEE: ERROR: {{.*}}runtime/Sanitizer/ubsan/ubsan_handlers.cpp:{{[0-9]+}}: misaligned-pointer-use
+  // CHECK: KLEE: ERROR: {{.*}}ubsan_alignment-type-mismatch.c:{{[0-9]+}}: misaligned-pointer-use
   result = *p;
   return 0;
 }

@@ -1,23 +1,27 @@
-#include <unistd.h>
+/*===-- getenv.c ----------------------------------------------------------===//
+//
+//                     The KLEE Symbolic Virtual Machine
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===*/
 
-extern char nondet_char(void);
-extern unsigned nondet_uint(void);
-extern void klee_assume(int);
-extern void klee_make_symbolic(void *, size_t, const char *);
+#include "nondet.h"
 
-static char dummy_env[20];
+#include <stdlib.h>
 
-char *getenv(const char *name) {
-	(void) name;
+/* The variable is not set (the environment is empty). This is a real
+ * behavior, but only one of them (an under-approximation). */
 
-	if (nondet_char())
-		return ((char *) 0);
+__attribute__((weak)) char *getenv(const char *name) {
+  (void)name;
+  klee_report_under_approximation("getenv");
+  return (char *)0;
+}
 
-	klee_make_symbolic(dummy_env, sizeof(dummy_env), "dummy_env");
-
-	unsigned int idx = nondet_uint();
-	klee_assume(idx < sizeof(dummy_env));
-	dummy_env[idx] = '\0';
-
-	return dummy_env;
+__attribute__((weak)) char *secure_getenv(const char *name) {
+  (void)name;
+  klee_report_under_approximation("secure_getenv");
+  return (char *)0;
 }

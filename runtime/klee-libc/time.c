@@ -1,20 +1,16 @@
+#include "nondet.h"
+
 #include <unistd.h>
 #include <time.h>
 
-extern void klee_assume(int);
-extern void klee_make_symbolic(void *, size_t, const char *);
-
 time_t time(time_t *tloc) {
 	time_t retval;
-	klee_make_symbolic(&retval, sizeof(retval), "time");
+	klee_make_symbolic(&retval, sizeof(retval), KLEE_MODEL("time"));
 
-	if (tloc) {
-		if (retval < 0)
-			return ((time_t)-1);
+	/* any time (after the epoch) */
+	klee_assume(retval >= 0);
+	if (tloc)
 		*tloc = retval;
-	} else {
-		klee_assume(retval >= 0);
-	}
 
 	return retval;
 }

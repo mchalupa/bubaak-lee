@@ -23,7 +23,7 @@ int main() {
   klee_make_symbolic(&offset, sizeof(offset), "offset");
   klee_assume((size_t)(ptr) + offset != 0);
 
-  // CHECK: KLEE: ERROR: {{.*}}runtime/Sanitizer/ubsan/ubsan_handlers.cpp:{{[0-9]+}}: pointer-overflow
+  // CHECK: KLEE: ERROR: {{.*}}ubsan_pointer_overflow-pointer_arithmetic.c:{{[0-9]+}}: pointer-overflow
   result = ptr + offset;
 
   return 0;

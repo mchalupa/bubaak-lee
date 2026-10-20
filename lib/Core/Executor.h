@@ -260,6 +260,27 @@ private:
                             KCallable *callable,
                             const std::vector<Cell> &arguments);
 
+  /// Report (once per function) that the behaviors of a function were not
+  /// explored completely (KLEE: WARNING: under-approximation: NAME)
+  static void reportUnderApproximation(const std::string &name);
+
+  /// The result of checking a string argument of an external function
+  enum class StringCheck { Terminated, Unterminated, Unknown };
+
+  /// Check that the string at the address is terminated inside its object
+  /// (if it is, its contents are stored to `contents` when concrete).
+  StringCheck checkString(ExecutionState &state, const Cell &address,
+                          std::string *contents, bool &concrete);
+
+  /// Check the memory that a printing function (printf, puts, ...) reads.
+  /// Sets `hasWrite` if the call writes memory (%n), `unknown` if the
+  /// arguments could not be checked and `symbolicContents` if a printed
+  /// string is symbolic or unterminated (it cannot be printed natively).
+  /// Returns false if the state was terminated.
+  bool checkOutputCall(ExecutionState &state, const std::string &name,
+                       const std::vector<Cell> &arguments, bool &hasWrite,
+                       bool &unknown, bool &symbolicContents);
+
   ObjectState *bindObjectInState(ExecutionState &state, const MemoryObject *mo,
                                  bool isLocal, const Array *array = 0);
 

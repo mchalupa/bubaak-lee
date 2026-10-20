@@ -14,7 +14,7 @@ int main() {
 
   //  klee_make_symbolic(&f, sizeof(f), "f");
 
-  // CHECK: KLEE: ERROR: {{.*}}runtime/Sanitizer/ubsan/ubsan_handlers.cpp:{{[0-9]+}}: float-cast-overflow
+  // CHECK: KLEE: ERROR: {{.*}}ubsan_float_cast_overflow.c:{{[0-9]+}}: float-cast-overflow
   result = f + 0x80;
   return 0;
 }
