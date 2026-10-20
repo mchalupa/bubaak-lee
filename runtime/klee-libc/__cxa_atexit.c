@@ -9,6 +9,8 @@
 
 #include "klee/klee.h"
 
+#include <unistd.h>
+
 #define MAX_ATEXIT 128
 
 static struct {
@@ -18,19 +20,28 @@ static struct {
 } AtExit[MAX_ATEXIT];
 static unsigned NumAtExit = 0;
 
+/* Run the handlers in the reverse order of their registration. A handler is
+ * removed before it is called, so that every handler runs at most once (e.g.,
+ * if a handler calls exit()) and the handlers registered by the handlers run
+ * too. */
 static void RunAtExit(void) __attribute__((destructor));
 static void RunAtExit(void) {
-  unsigned i;
+  while (NumAtExit > 0) {
+    --NumAtExit;
+    AtExit[NumAtExit].fn(AtExit[NumAtExit].arg);
+  }
+}
 
-  for (i = NumAtExit - 1; i < MAX_ATEXIT; --i)
-    AtExit[i].fn(AtExit[i].arg);
+/* KLEE handles exit() only if the program does not define it. Returning
+ * from main runs the handlers as a destructor, run them also on exit(). */
+void exit(int status) {
+  RunAtExit();
+  _exit(status);
 }
 
 int __cxa_atexit(void (*fn)(void*),
                  void *arg,
                  void *dso_handle) {
-  klee_warning_once("FIXME: __cxa_atexit being ignored");
-  
   /* Better to just report an error here than return 1 (the defined
    * semantics).
    */

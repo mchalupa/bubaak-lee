@@ -4398,8 +4398,10 @@ void Executor::terminateStateOnError(ExecutionState &state,
   Instruction * lastInst;
   const InstructionInfo &ii = getLastNonKleeInternalInstruction(state, &lastInst);
 
-  // on abort, we want to report also uncleaned memory
-  if (CheckMemCleanup && terminationType == StateTerminationType::Abort) {
+  // on abort, we want to report also uncleaned memory (a failed assertion
+  // calls abort() too)
+  if (CheckMemCleanup && (terminationType == StateTerminationType::Abort ||
+                          terminationType == StateTerminationType::Assert)) {
     auto leaks = getMemoryLeaks(state);
     if (!leaks.empty()) {
       std::string info = "";
