@@ -1480,9 +1480,14 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
     klee_warning_once(reason.c_str(), "%s", os.str().c_str());
 
 
-  const auto& pathfile = interpreterHandler->dumpPath(state);
-  if (!pathfile.empty())
-    klee_warning("Dumped unfinished path to file: %s", pathfile.c_str());
+  // dump the path of the state so that another tool can continue from the
+  // state precisely (the state goes on with the concretized value)
+  if (pathWriter) {
+    const auto& pathfile = interpreterHandler->dumpPath(state);
+    if (!pathfile.empty())
+      klee_warning("Dumped unfinished path to file: %s (reason: %s)",
+                   pathfile.c_str(), reason.c_str());
+  }
 
   if (concretize)
     addConstraint(state, EqExpr::create(e, cvalue));
@@ -4444,6 +4449,17 @@ void Executor::terminateStateOnError(ExecutionState &state,
              isIncompleteTermination(terminationType)) {
     // KLEE does not explore the paths that continue from this state
     reportError(messaget, state, info, suffix, terminationType);
+  }
+
+  // KLEE does not explore the paths that continue from a state killed by an
+  // execution error (e.g., an unsupported instruction); dump its path so
+  // that another tool can continue from it (as in toConstant)
+  if (pathWriter && terminationType > StateTerminationType::USERERR &&
+      terminationType <= StateTerminationType::EXECERR) {
+    const auto& pathfile = interpreterHandler->dumpPath(state);
+    if (!pathfile.empty())
+      klee_warning("Dumped unfinished path to file: %s (reason: %s)",
+                   pathfile.c_str(), message.c_str());
   }
 
   terminateState(state, terminationType);
