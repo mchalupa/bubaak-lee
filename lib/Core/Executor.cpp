@@ -4127,85 +4127,66 @@ static std::vector<const MemoryObject *> getMemoryLeaks(ExecutionState &state) {
     return leaks;
 }
 
-static void getPointers(const llvm::Type *type,
-                        const llvm::DataLayout& DL,
-                        const ObjectState *os,
-                        std::set<ref<Expr>>& objects,
-                        unsigned off=0) {
-  using namespace llvm;
-
+// Get the segments of the pointers stored in the object. The pointers are
+// found by the segment plane (not by the type of the object, which is opaque
+// for pointers): every pointer-aligned position is read. Returns false if
+// the object may contain a pointer that is not aligned (then not all
+// pointers are known).
+static bool getPointers(const ObjectState *os, std::set<ref<Expr>> &segments) {
   const auto ptrWidth = Context::get().getPointerWidth();
+  const unsigned ptrBytes = ptrWidth / 8;
+  const uint64_t size = os->getSizeBound();
+  std::vector<bool> covered(size, false);
 
-  // XXX: we ignore integer types which is wrong since
-  // we can cast pointer to integer... we should actually search
-  // any object that has segment plane set
-  for (auto *Ty : type->subtypes()) {
-      if (Ty->isStructTy()) {
-          getPointers(Ty, DL, os, objects, off);
-      } else if (auto AT = dyn_cast<ArrayType>(Ty)) {
-          if (AT->getElementType()->isIntegerTy())
-              continue; // we cannot find anything here
-
-          // we must search on all indices in the array,
-          // so just artificially shift offsets
-          for (unsigned idx = 0; idx < AT->getNumElements(); ++idx) {
-              getPointers(Ty, DL, os, objects,
-                          off + idx*DL.getTypeAllocSize(AT->getElementType()));
-          }
-      } if (Ty->isPointerTy()) {
-        KValue ptr = os->read(off, ptrWidth);
-       //llvm::errs() << "TY @ " << off << ": " << *Ty << "\n";
-       //llvm::errs() << "  --> POINTER!: " << *Ty << "\n";
-       //llvm::errs() << "  --> " << ptr << "\n";
-        objects.insert(ptr.getSegment());
-      }
-      // FIXME: is this always enough? Does this cover padding
-      // in any structure?
-      off += DL.getTypeAllocSize(Ty);
+  for (uint64_t off = 0; off + ptrBytes <= size; off += ptrBytes) {
+    ref<Expr> segment = os->read(off, ptrWidth).getSegment();
+    if (auto *ce = dyn_cast<klee::ConstantExpr>(segment); ce && ce->isZero())
+      continue;
+    segments.insert(segment);
+    for (unsigned i = 0; i < ptrBytes; ++i)
+      covered[off + i] = true;
   }
+
+  // a part of a pointer at a position that is not aligned?
+  for (uint64_t off = 0; off < size; ++off) {
+    if (covered[off])
+      continue;
+    ref<Expr> segment = os->read8(off).getSegment();
+    if (auto *ce = dyn_cast<klee::ConstantExpr>(segment); ce && ce->isZero())
+      continue;
+    return false;
+  }
+  return true;
 }
 
 bool
 Executor::getReachableMemoryObjects(ExecutionState &state,
                                     std::set<const MemoryObject *>& reachable) {
-    std::set<ObjectPair> queue;
-
-    DataLayout& DL = *kmodule->targetData;
+    std::vector<ObjectPair> queue;
 
     for (auto& object : state.addressSpace.objects) {
       // the only objects that are still left are those that
       // are either local to main or global (or heap-allocated,
-      // but we do not care about those while initializing queue)
+      // which are reachable only through the others)
       if (object.first->isLocal || object.first->isGlobal) {
-
-        reachable.insert(object.first);
-
-        if (!object.first->allocSite ||
-            (!llvm::isa<llvm::AllocaInst>(object.first->allocSite) &&
-            !llvm::isa<llvm::GlobalValue>(object.first->allocSite))){
-          continue;
-        }
-
-        queue.emplace(object.first, object.second.get());
+        if (reachable.insert(object.first).second)
+          queue.emplace_back(object.first, object.second.get());
       }
     }
 
     bool retval = true;
 
     // iterate the search until we searched all the reachable objects
+    // (the globals, the locals, and the heap objects that they point to)
     while (!queue.empty()) {
-      ObjectPair object = *queue.begin();
-      queue.erase(queue.begin());
-
-      if (!object.first->allocSite ||
-          (!llvm::isa<llvm::AllocaInst>(object.first->allocSite) &&
-          !llvm::isa<llvm::GlobalValue>(object.first->allocSite))){
-        continue;
-      }
+      ObjectPair object = queue.back();
+      queue.pop_back();
 
       std::set<ref<Expr>> segments;
-      getPointers(object.first->allocSite->getType(), DL,
-                  &*object.second, segments);
+      if (!getPointers(object.second, segments)) {
+        klee_warning("Unaligned pointer in memcleanup check");
+        retval = false;
+      }
 
       for (auto segment : segments) {
         segment = toUnique(state, segment);
@@ -4224,7 +4205,7 @@ Executor::getReachableMemoryObjects(ExecutionState &state,
               if (reachable.insert(result.first).second) {
                   // if we haven't found this memory before,
                   // add it to queue for processing
-                  queue.insert(result);
+                  queue.push_back(result);
               }
           } else {
               if (state.addressSpace.removedObjectsMap.count(segval) > 0)
