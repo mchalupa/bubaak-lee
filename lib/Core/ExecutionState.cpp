@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <iomanip>
 #include <map>
 #include <set>
@@ -119,10 +120,33 @@ ExecutionState::ExecutionState(const ExecutionState& state):
     newCoverage(state.newCoverage),
     forkDisabled(state.forkDisabled),
     overApproximation(state.overApproximation),
+    decisions(state.decisions),
+    prefixNode(state.prefixNode),
     base_addrs(state.base_addrs),
     base_mos(state.base_mos) {
   for (const auto &cur_mergehandler: openMergeStack)
     cur_mergehandler->addOpenState(this);
+}
+
+std::string ExecutionState::pathString() const {
+  return klee::pathString(decisions.get());
+}
+
+std::string klee::pathString(const PathDecision *last) {
+  std::vector<std::uint32_t> path;
+  for (const PathDecision *d = last; d; d = d->parent.get())
+    path.push_back(d->decision);
+  std::string res;
+  for (auto it = path.rbegin(); it != path.rend(); ++it) {
+    if (*it < 10)
+      res += static_cast<char>('0' + *it);
+    else
+      res += "(" + std::to_string(*it) + ")";
+  }
+  char hash[17];
+  std::snprintf(hash, sizeof(hash), "%016llx",
+                static_cast<unsigned long long>(last ? last->hash : 0));
+  return res + "#" + hash;
 }
 
 ExecutionState *ExecutionState::branch() {

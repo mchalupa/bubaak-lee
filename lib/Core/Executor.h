@@ -173,6 +173,37 @@ private:
   /// drive execution.
   const std::vector<struct KTest *> *usingSeeds;  
 
+  /// Record the decisions at symbolic branches on the paths
+  /// (-write-unfinished-paths, -prefix-paths)
+  bool recordDecisions = false;
+
+  /// The trie of the prefix paths (-prefix-paths)
+  std::unique_ptr<PrefixPathNode> prefixPaths;
+
+  /// The paths of the states that KLEE did not finish
+  /// (-write-unfinished-paths)
+  std::unique_ptr<llvm::raw_fd_ostream> unfinishedPathsFile;
+
+  /// The paths of the states killed by an execution error
+  /// (-write-unfinished-paths)
+  std::unique_ptr<llvm::raw_fd_ostream> killedPathsFile;
+
+  /// The prefix paths whose ends some states reached (-prefix-paths)
+  std::unique_ptr<llvm::raw_fd_ostream> usedPrefixPathsFile;
+
+  /// The number of states outside of the prefix paths
+  std::uint64_t prunedStates = 0;
+
+  /// The number of the prefix paths whose ends some states reached
+  std::uint64_t usedPrefixPaths = 0;
+
+  /// The number of the states that did not replay the prefix paths as the
+  /// runs that wrote them (other branches)
+  std::uint64_t misalignedPrefixPaths = 0;
+
+  /// The paths of the states that are being dumped were written already
+  bool unfinishedPathsWritten = false;
+
   /// Disables forking, instead a random path is chosen. Enabled as
   /// needed to control memory usage. \see fork()
   bool atMemoryLimit;
@@ -543,6 +574,51 @@ private:
   /// used in the termination functions below.
   void terminateState(ExecutionState &state, StateTerminationType reason);
 
+  /// Remove the state like terminateState, but do not count it as an
+  /// explored path (it is outside of the prefix paths)
+  void pruneState(ExecutionState &state);
+
+  /// Remove state from queue and delete state (without counting it)
+  void removeState(ExecutionState &state, StateTerminationType reason);
+
+  /// Add the prefix paths from the file to the trie (-prefix-paths,
+  /// -seeded-prefix-paths if `seeded`)
+  void loadPrefixPaths(const std::string &file, bool seeded);
+
+  /// Move the state to the node of the trie of the prefix paths; at the end
+  /// of a prefix path, the state is free (and the prefix paths below are
+  /// reported as used). False if the state must be pruned: it reached the
+  /// end of a prefix path by other branches than the run that wrote the
+  /// path, or it has no seeds and only seeded prefix paths end here
+  bool enterPrefixNode(ExecutionState &state, const PrefixPathNode *node);
+
+  /// Count a state that did not replay a prefix path (warn the first time)
+  void noteMisaligned();
+
+  /// May the state take the decision (it is free or a prefix path takes it)?
+  static bool prefixAllows(const ExecutionState &state,
+                           std::uint32_t decision) {
+    return !state.prefixNode || state.prefixNode->children.count(decision);
+  }
+
+  /// Record the decision at a symbolic branch with the condition of the
+  /// given hash (it must be allowed, see prefixAllows); the state is free
+  /// when it reaches the end of a prefix path (the prefix paths below are
+  /// reported as used). False if the state reached the end of a prefix path
+  /// by other branches than the run that wrote the path (it must be pruned)
+  bool decide(ExecutionState &state, std::uint32_t decision,
+              unsigned conditionHash);
+
+  /// Report the prefix paths of the subtree as used
+  void reportUsedPrefixPaths(const PrefixPathNode &node);
+
+  /// Write the path of the state (and the decision at the branch with the
+  /// condition of the given hash, if not negative) to the unfinished paths
+  /// (-write-unfinished-paths)
+  void writeUnfinishedPath(const ExecutionState &state,
+                           std::int64_t decision = -1,
+                           unsigned conditionHash = 0);
+
   /// Call exit handler and terminate state normally
   /// (end of execution path)
   void terminateStateOnExit(ExecutionState &state);
@@ -657,8 +733,9 @@ private:
 
   /// With -write-incomplete-tests, write a test for the branch (given by
   /// `condition`) that is not explored because forking is inhibited
-  void writeDroppedBranchTest(const ExecutionState &state,
-                              ref<Expr> condition);
+  /// (`decision` is the decision of the dropped branch, see decide)
+  void writeDroppedBranchTest(const ExecutionState &state, std::int64_t decision,
+                              ref<Expr> condition, unsigned conditionHash);
 
   /// Only for debug purposes; enable via debugger or klee-control
   void dumpStates();

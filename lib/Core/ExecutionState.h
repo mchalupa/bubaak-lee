@@ -26,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace klee {
@@ -173,6 +174,54 @@ struct CleanupPhaseUnwindingInformation : public UnwindingInformation {
   static bool classof(const UnwindingInformation *u) {
     return u->getKind() == UnwindingInformation::Kind::CleanupPhase;
   }
+};
+
+/// @brief A decision at a symbolic branch on a path: the taken branch (0 or
+/// 1 for a two-way branch, the index of the case otherwise). The decisions
+/// form a list from the last one to the first one, shared by the states.
+struct PathDecision {
+  mutable std::shared_ptr<const PathDecision> parent;
+  std::uint32_t decision;
+  /// a hash of the decisions and the conditions of the branches on the path
+  /// (a replay that does not take the same branches gets another hash)
+  std::uint64_t hash;
+
+  PathDecision(std::shared_ptr<const PathDecision> parent,
+               std::uint32_t decision, unsigned conditionHash)
+      : parent(std::move(parent)), decision(decision) {
+    std::uint64_t h = this->parent ? this->parent->hash : 0;
+    for (std::uint64_t v : {std::uint64_t(decision), std::uint64_t(conditionHash)})
+      h = (h ^ v) * 0x100000001b3ULL + 0x9e3779b97f4a7c15ULL;
+    hash = h;
+  }
+  ~PathDecision() {
+    // (no recursion on long paths)
+    auto p = std::move(parent);
+    while (p && p.use_count() == 1)
+      p = std::move(p->parent);
+  }
+};
+
+/// @brief The decisions on the path that ends with `last` as a string (see
+/// ExecutionState::pathString)
+std::string pathString(const PathDecision *last);
+
+/// @brief A node of the trie of prefix paths (see -prefix-paths)
+struct PrefixPathNode {
+  std::map<std::uint32_t, std::unique_ptr<PrefixPathNode>> children;
+  /// the ids of the paths that end here
+  std::vector<std::string> ids;
+  /// the ids of the paths that end here and only seeded states continue
+  /// (see -seeded-prefix-paths)
+  std::vector<std::string> seededIds;
+  /// the hash of the path (see PathDecision::hash) of the paths that end
+  /// here, the state must have the same hash (if the paths have hashes)
+  std::uint64_t hash = 0;
+  bool hasHash = false;
+  /// the paths that end here have different hashes (no state matches)
+  bool conflict = false;
+  /// the paths of the subtree were reported as used
+  bool used = false;
 };
 
 /// @brief ExecutionState representing a path under exploration
@@ -339,6 +388,15 @@ public:
   /// may be infeasible, so its errors are not reported
   std::string overApproximation;
 
+  /// @brief The last decision at a symbolic branch on the path (with
+  /// -write-unfinished-paths or -prefix-paths, null at the start)
+  std::shared_ptr<const PathDecision> decisions;
+
+  /// @brief With -prefix-paths, the node of the trie of prefix paths where
+  /// the state is: the state explores only the prefix paths until it
+  /// reaches the end of one of them (then it is null, the state is free)
+  const PrefixPathNode *prefixNode = nullptr;
+
   /// @brief Mapping symbolic address expressions to concrete base addresses
   using base_addrs_t = std::map<ref<Expr>, ref<ConstantExpr>>;
   base_addrs_t base_addrs;
@@ -347,6 +405,14 @@ public:
   base_mo_t base_mos;
 
 public:
+  /// @brief The decisions on the path as a string: the decisions from the
+  /// first one, 0 to 9 as digits, the others as `(N)`, then `#` and the
+  /// hash of the path in hex
+  std::string pathString() const;
+
+  /// @brief The hash of the path (see PathDecision::hash)
+  std::uint64_t pathHash() const { return decisions ? decisions->hash : 0; }
+
 #ifdef KLEE_UNITTEST
   // provide this function only in the context of unittests
   ExecutionState() = default;

@@ -171,6 +171,41 @@ cl::opt<bool> WriteIncompleteTests(
              "halts because of -exit-on-error-type (default=false)"),
     cl::cat(TestGenCat));
 
+cl::opt<bool> WriteUnfinishedPaths(
+    "write-unfinished-paths",
+    cl::init(false),
+    cl::desc("Write the paths (the decisions at symbolic branches) of the "
+             "states from which KLEE does not explore all paths and that it "
+             "can continue: the states dumped on halt (all of them, also "
+             "with -max-dumped-states), terminated early, and branches "
+             "dropped because forking was inhibited. The paths are written "
+             "to unfinished-paths.txt (one per line) and to the object "
+             "klee_path of the tests. The paths of the states killed by an "
+             "execution error (e.g., an unsupported external call) are "
+             "written to killed-paths.txt (default=false)"),
+    cl::cat(TestGenCat));
+
+cl::opt<std::string> PrefixPaths(
+    "prefix-paths",
+    cl::desc("Explore only the paths that continue the paths in the file "
+             "(lines `ID PATH`, see -write-unfinished-paths): the other "
+             "paths are pruned and the states that did not reach the end of "
+             "a prefix path are not dumped on halt. The IDs of the prefix "
+             "paths whose ends were reached (all paths below them are "
+             "explored or their unfinished paths written) are written to "
+             "used-prefix-paths.txt. A state that does not reach the end of a "
+             "prefix path as the run that wrote it (the hashes of the paths "
+             "differ) is pruned"),
+    cl::cat(SeedingCat));
+
+cl::opt<std::string> SeededPrefixPaths(
+    "seeded-prefix-paths",
+    cl::desc("Like -prefix-paths (both can be given), but only seeded states "
+             "continue from the ends of these paths, the other states are "
+             "pruned there (e.g., the paths of the states killed by an "
+             "unsupported call, see killed-paths.txt)"),
+    cl::cat(SeedingCat));
+
 cl::opt<unsigned> MaxDumpedStates(
     "max-dumped-states",
     cl::init(0),
@@ -1125,14 +1160,30 @@ void Executor::branch(ExecutionState &state,
   TimerStatIncrementer timer(stats::forkTime);
   unsigned N = conditions.size();
   assert(N);
+  // a decision on the path (values of seeds are not decisions, there are
+  // such branches only with seeds)
+  bool decides = N > 1 && reason != BranchType::GetVal;
+  auto allowed = [&](unsigned i) { return !decides || prefixAllows(state, i); };
 
   if (!branchingPermitted(state)) {
-    unsigned next = theRNG.getInt32() % N;
+    std::vector<unsigned> choices;
+    for (unsigned i = 0; i < N; ++i)
+      if (allowed(i))
+        choices.push_back(i);
+    if (choices.empty()) {
+      // (the prefix paths take another kind of branch here)
+      pruneState(state);
+      result.assign(N, nullptr);
+      return;
+    }
+    unsigned next = choices[theRNG.getInt32() % choices.size()];
     for (unsigned i=0; i<N; ++i) {
       if (i == next) {
         result.push_back(&state);
       } else {
-        writeDroppedBranchTest(state, conditions[i]);
+        if (allowed(i))
+          writeDroppedBranchTest(state, decides ? i : -1, conditions[i],
+                                 conditions[i]->hash());
         result.push_back(nullptr);
       }
     }
@@ -1196,6 +1247,19 @@ void Executor::branch(ExecutionState &state,
           terminateStateEarlyAlgorithm(*result[i], "Unseeded path during replay", StateTerminationType::Replay);
           result[i] = nullptr;
         }
+      }
+    }
+  }
+
+  if (decides) {
+    // follow only the prefix paths
+    for (unsigned i = 0; i < N; ++i) {
+      if (!result[i])
+        continue;
+      if (!prefixAllows(*result[i], i) ||
+          !decide(*result[i], i, conditions[i]->hash())) {
+        pruneState(*result[i]);
+        result[i] = nullptr;
       }
     }
   }
@@ -1316,6 +1380,46 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
     return StatePair(nullptr, nullptr);
   }
 
+  // a symbolic branch (a decision on the path)
+  bool symbolic = res == Solver::Unknown;
+  unsigned conditionHash = symbolic ? condition->hash() : 0;
+  if (symbolic && current.prefixNode) {
+    // follow only the prefix paths
+    bool trueAllowed = prefixAllows(current, 1);
+    bool falseAllowed = prefixAllows(current, 0);
+    if (!trueAllowed && !falseAllowed) {
+      // (the prefix paths take another kind of branch here)
+      pruneState(current);
+      return StatePair(nullptr, nullptr);
+    }
+    if (!(trueAllowed && falseAllowed)) {
+      if (isSeeding) {
+        // the seeds that take the other branch would be patched
+        auto &seeds = it->second;
+        seeds.erase(std::remove_if(seeds.begin(), seeds.end(),
+                                   [&](SeedInfo &si) {
+                                     ref<ConstantExpr> value;
+                                     bool success = solver->getValue(
+                                         current.constraints,
+                                         si.assignment.evaluate(condition),
+                                         value, current.queryMetaData);
+                                     assert(success && "FIXME: Unhandled solver failure");
+                                     (void)success;
+                                     return value->isTrue() != trueAllowed;
+                                   }),
+                    seeds.end());
+        if (seeds.empty()) {
+          seedMap.erase(it);
+          it = seedMap.end();
+          isSeeding = false;
+        }
+      }
+      addConstraint(current, trueAllowed ? condition
+                                         : Expr::createIsZero(condition));
+      res = trueAllowed ? Solver::True : Solver::False;
+    }
+  }
+
   if (!isSeeding) {
     if (replayPath && !isInternal) {
       assert(replayPosition<replayPath->size() &&
@@ -1342,11 +1446,12 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       if (!branchingPermitted(current)) {
         TimerStatIncrementer timer(stats::forkTime);
         if (theRNG.getBool()) {
-          writeDroppedBranchTest(current, Expr::createIsZero(condition));
+          writeDroppedBranchTest(current, 0, Expr::createIsZero(condition),
+                                 conditionHash);
           addConstraint(current, condition);
           res = Solver::True;        
         } else {
-          writeDroppedBranchTest(current, condition);
+          writeDroppedBranchTest(current, 1, condition, conditionHash);
           addConstraint(current, Expr::createIsZero(condition));
           res = Solver::False;
         }
@@ -1402,6 +1507,10 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       }
     }
 
+    if (symbolic && !decide(current, 1, conditionHash)) {
+      pruneState(current);
+      return StatePair(nullptr, nullptr);
+    }
     return StatePair(&current, nullptr);
   } else if (res==Solver::False) {
     if (!isInternal) {
@@ -1410,6 +1519,10 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       }
     }
 
+    if (symbolic && !decide(current, 0, conditionHash)) {
+      pruneState(current);
+      return StatePair(nullptr, nullptr);
+    }
     return StatePair(nullptr, &current);
   } else {
     TimerStatIncrementer timer(stats::forkTime);
@@ -1478,11 +1591,22 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
 
     addConstraint(*trueState, condition);
     addConstraint(*falseState, Expr::createIsZero(condition));
+    // (a replay that does not match the prefix paths is pruned)
+    if (!decide(*trueState, 1, conditionHash)) {
+      pruneState(*trueState);
+      trueState = nullptr;
+    }
+    if (!decide(*falseState, 0, conditionHash)) {
+      pruneState(*falseState);
+      falseState = nullptr;
+    }
 
     // Kinda gross, do we even really still want this option?
-    if (MaxDepth && MaxDepth<=trueState->depth) {
-      terminateStateEarly(*trueState, "max-depth exceeded.", StateTerminationType::MaxDepth);
-      terminateStateEarly(*falseState, "max-depth exceeded.", StateTerminationType::MaxDepth);
+    if (MaxDepth && MaxDepth<=current.depth) {
+      if (trueState)
+        terminateStateEarly(*trueState, "max-depth exceeded.", StateTerminationType::MaxDepth);
+      if (falseState)
+        terminateStateEarly(*falseState, "max-depth exceeded.", StateTerminationType::MaxDepth);
       return StatePair(nullptr, nullptr);
     }
 
@@ -3026,7 +3150,9 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     KValue cond = eval(ki, 0, state);
     const Cell &tCell = eval(ki, 1, state);
     const Cell &fCell = eval(ki, 2, state);
-    if (CoverSelects && statsTracker &&
+    // (not when recording the paths: the decision would depend on the
+    // coverage, so the paths would depend on the order of the search)
+    if (CoverSelects && !recordDecisions && statsTracker &&
         state.stack.back().kf->trackCoverage &&
         !i->getOperand(0)->getType()->isVectorTy() &&
         !isa<ConstantExpr>(cond.getValue()) &&
@@ -4052,14 +4178,36 @@ void Executor::doDumpStates() {
     progressFile->flush();
   }
 
-  if (states.empty())
+  // the states that did not reach the end of a prefix path are not dumped
+  // (the prefix paths are left for later)
+  std::vector<ExecutionState *> restricted, others;
+  for (ExecutionState *state : states)
+    (state->prefixNode ? restricted : others).push_back(state);
+  for (ExecutionState *state : restricted)
+    pruneState(*state);
+  if (prefixPaths)
+    klee_message("pruned %lu states outside of the prefix paths",
+                 (unsigned long)prunedStates);
+
+  // the paths of all states first (it is fast), then the tests
+  if (unfinishedPathsFile) {
+    for (ExecutionState *state : others)
+      writeUnfinishedPath(*state);
+    unfinishedPathsFile->flush();
+    unfinishedPathsWritten = true;
+    klee_message("wrote the paths of %zu unfinished states", others.size());
+  }
+
+  if (others.empty()) {
+    updateStates(nullptr);
     return;
+  }
 
   // which states to dump (a random sample if there are too many)
-  std::vector<bool> dump(states.size(), DumpStatesOnHalt);
+  std::vector<bool> dump(others.size(), DumpStatesOnHalt);
   if (DumpStatesOnHalt && MaxDumpedStates > 0 &&
-      states.size() > MaxDumpedStates) {
-    std::vector<size_t> idx(states.size());
+      others.size() > MaxDumpedStates) {
+    std::vector<size_t> idx(others.size());
     for (size_t i = 0; i < idx.size(); ++i)
       idx[i] = i;
     // partial Fisher-Yates shuffle
@@ -4067,11 +4215,11 @@ void Executor::doDumpStates() {
       size_t j = i + theRNG.getInt32() % (idx.size() - i);
       std::swap(idx[i], idx[j]);
     }
-    dump.assign(states.size(), false);
+    dump.assign(others.size(), false);
     for (size_t i = 0; i < MaxDumpedStates; ++i)
       dump[idx[i]] = true;
     klee_message("halting execution, dumping %u of %zu remaining states",
-                 MaxDumpedStates.getValue(), states.size());
+                 MaxDumpedStates.getValue(), others.size());
   } else if (DumpStatesOnHalt) {
     klee_message("halting execution, dumping remaining states");
   }
@@ -4079,7 +4227,7 @@ void Executor::doDumpStates() {
   dumpingStates = true;
   dumpMinimizationSpent = time::Span();
   size_t i = 0;
-  for (ExecutionState *state : states)
+  for (ExecutionState *state : others)
     if (dump[i++])
       terminateStateEarly(*state, "Execution halting.",
                           StateTerminationType::Interrupted);
@@ -4094,7 +4242,10 @@ void Executor::writeProgress() {
   *progressFile << (time::getWallTime() - runStartTime).toMicroseconds() / 1000
                 << ' ' << stats::coveredInstructions.getValue() << ' '
                 << states.size() << ' ' << stats::forks.getValue() << ' '
-                << stats::instructions.getValue() << '\n';
+                << stats::instructions.getValue();
+  if (prefixPaths)
+    *progressFile << ' ' << usedPrefixPaths;
+  *progressFile << '\n';
   progressFile->flush();
 }
 
@@ -4110,13 +4261,38 @@ void Executor::run(ExecutionState &initialState) {
 
   states.insert(&initialState);
 
+  bool withPrefixPaths = !PrefixPaths.empty() || !SeededPrefixPaths.empty();
+  if (WriteUnfinishedPaths || withPrefixPaths)
+    recordDecisions = true;
+  if (WriteUnfinishedPaths) {
+    unfinishedPathsFile =
+        interpreterHandler->openOutputFile("unfinished-paths.txt");
+    killedPathsFile = interpreterHandler->openOutputFile("killed-paths.txt");
+  }
+  if (withPrefixPaths) {
+    prefixPaths = std::make_unique<PrefixPathNode>();
+    if (!PrefixPaths.empty())
+      loadPrefixPaths(PrefixPaths, false);
+    if (!SeededPrefixPaths.empty())
+      loadPrefixPaths(SeededPrefixPaths, true);
+    usedPrefixPathsFile =
+        interpreterHandler->openOutputFile("used-prefix-paths.txt");
+  }
+
   if (usingSeeds) {
     std::vector<SeedInfo> &v = seedMap[&initialState];
     
     for (std::vector<KTest*>::const_iterator it = usingSeeds->begin(), 
            ie = usingSeeds->end(); it != ie; ++it)
       v.push_back(SeedInfo(*it));
+  }
 
+  if (prefixPaths && !enterPrefixNode(initialState, prefixPaths.get())) {
+    klee_warning("the initial state does not continue any prefix path");
+    initialState.prefixNode = prefixPaths.get();
+  }
+
+  if (usingSeeds) {
     int lastNumSeeds = usingSeeds->size()+10;
     time::Point lastTime, startTime = lastTime = time::getWallTime();
     ExecutionState *lastState = 0;
@@ -4260,6 +4436,141 @@ std::string Executor::getKValueInfo(ExecutionState &state,
   return info.str();
 }
 
+void Executor::loadPrefixPaths(const std::string &file, bool seeded) {
+  std::ifstream in(file);
+  if (!in)
+    klee_error("unable to open the prefix paths: %s", file.c_str());
+  std::string line;
+  std::size_t count = 0;
+  while (std::getline(in, line)) {
+    if (line.empty())
+      continue;
+    auto space = line.find(' ');
+    std::string id = line.substr(0, space);
+    std::string path = space == std::string::npos ? "" : line.substr(space + 1);
+    // (a path without a hash is not checked)
+    std::uint64_t hash = 0;
+    auto sharp = path.find('#');
+    if (sharp != std::string::npos) {
+      hash = std::stoull(path.substr(sharp + 1), nullptr, 16);
+      path.resize(sharp);
+    }
+    PrefixPathNode *node = prefixPaths.get();
+    for (std::size_t i = 0; i < path.size(); ++i) {
+      std::uint32_t decision;
+      if (path[i] == '(') {
+        auto end = path.find(')', i);
+        if (end == std::string::npos)
+          klee_error("malformed prefix path %s in %s", id.c_str(), file.c_str());
+        decision = std::stoul(path.substr(i + 1, end - i - 1));
+        i = end;
+      } else if (path[i] >= '0' && path[i] <= '9') {
+        decision = path[i] - '0';
+      } else {
+        klee_error("malformed prefix path %s in %s", id.c_str(), file.c_str());
+      }
+      auto &child = node->children[decision];
+      if (!child)
+        child = std::make_unique<PrefixPathNode>();
+      node = child.get();
+    }
+    if (sharp != std::string::npos) {
+      if (node->hasHash && node->hash != hash)
+        node->conflict = true;
+      node->hash = hash;
+      node->hasHash = true;
+    }
+    (seeded ? node->seededIds : node->ids).push_back(id);
+    ++count;
+  }
+  klee_message("using %zu %sprefix paths", count, seeded ? "seeded " : "");
+}
+
+void Executor::reportUsedPrefixPaths(const PrefixPathNode &node) {
+  std::vector<const PrefixPathNode *> todo{&node};
+  while (!todo.empty()) {
+    const PrefixPathNode *n = todo.back();
+    todo.pop_back();
+    if (n->used)
+      continue;
+    const_cast<PrefixPathNode *>(n)->used = true;
+    usedPrefixPaths += n->ids.size() + n->seededIds.size();
+    if (usedPrefixPathsFile) {
+      for (const std::string &id : n->ids)
+        *usedPrefixPathsFile << id << '\n';
+      for (const std::string &id : n->seededIds)
+        *usedPrefixPathsFile << id << '\n';
+    }
+    for (const auto &child : n->children)
+      todo.push_back(child.second.get());
+  }
+  if (usedPrefixPathsFile)
+    usedPrefixPathsFile->flush();
+}
+
+bool Executor::decide(ExecutionState &state, std::uint32_t decision,
+                      unsigned conditionHash) {
+  if (!recordDecisions)
+    return true;
+  state.decisions = std::make_shared<const PathDecision>(
+      std::move(state.decisions), decision, conditionHash);
+  if (!state.prefixNode)
+    return true;
+  auto it = state.prefixNode->children.find(decision);
+  assert(it != state.prefixNode->children.end() && "decision not allowed");
+  return enterPrefixNode(state, it->second.get());
+}
+
+bool Executor::enterPrefixNode(ExecutionState &state,
+                               const PrefixPathNode *node) {
+  state.prefixNode = node;
+  bool end = !node->ids.empty() ||
+             (!node->seededIds.empty() && seedMap.count(&state));
+  if (!end)
+    // (a state without seeds at the end of only seeded prefix paths)
+    return !node->children.empty();
+  // the end of a prefix path: the replay took the same branches as the run
+  // that wrote the path if the hashes match (the prefix paths are replayed
+  // without the solver, so this is the check that the state is on the path)
+  if (node->conflict || (node->hasHash && node->hash != state.pathHash())) {
+    noteMisaligned();
+    return false;
+  }
+  // the state explores all paths from here
+  reportUsedPrefixPaths(*node);
+  state.prefixNode = nullptr;
+  return true;
+}
+
+void Executor::writeUnfinishedPath(const ExecutionState &state,
+                                   std::int64_t decision,
+                                   unsigned conditionHash) {
+  // (the prefix paths below a state that did not reach the end of one stay
+  // unfinished, its path was not checked, see enterPrefixNode)
+  if (!unfinishedPathsFile || state.prefixNode)
+    return;
+  if (decision >= 0) {
+    PathDecision last(state.decisions, static_cast<std::uint32_t>(decision),
+                      conditionHash);
+    *unfinishedPathsFile << pathString(&last) << '\n';
+  } else {
+    *unfinishedPathsFile << state.pathString() << '\n';
+  }
+}
+
+void Executor::pruneState(ExecutionState &state) {
+  ++prunedStates;
+  removeState(state, StateTerminationType::Replay);
+}
+
+void Executor::noteMisaligned() {
+  if (misalignedPrefixPaths++ == 0)
+    klee_warning("a state does not replay a prefix path as the run that "
+                 "wrote it, pruning (misaligned replay)");
+}
+
+
+
 void Executor::terminateState(ExecutionState &state,
                               StateTerminationType reason) {
   if (replayKTest && replayPosition!=replayKTest->numObjects) {
@@ -4273,6 +4584,11 @@ void Executor::terminateState(ExecutionState &state,
     lastTestState = nullptr;
 
   interpreterHandler->incPathsExplored();
+  removeState(state, reason);
+}
+
+void Executor::removeState(ExecutionState &state,
+                           StateTerminationType reason) {
   executionTree->setTerminationType(state, reason);
 
   std::vector<ExecutionState *>::iterator it =
@@ -4540,6 +4856,12 @@ void Executor::terminateStateEarly(ExecutionState &state, const Twine &message,
 
   // with -exit-on-error-type, we generate tests only for errors
   // (unless asked otherwise)
+  // (KLEE can continue these states)
+  if (reason > StateTerminationType::EXIT &&
+      reason <= StateTerminationType::EARLY && !haltedOnError &&
+      !unfinishedPathsWritten)
+    writeUnfinishedPath(state);
+
   bool writeTests =
       ExitOnErrorType.empty() ||
       ((DumpStatesUnlessExitOnError || WriteIncompleteTests) && !haltedOnError);
@@ -4603,10 +4925,19 @@ static bool isIncompleteTermination(StateTerminationType reason) {
 }
 
 void Executor::writeDroppedBranchTest(const ExecutionState &state,
-                                      ref<Expr> condition) {
-  if (!WriteIncompleteTests || haltedOnError)
+                                      std::int64_t decision,
+                                      ref<Expr> condition,
+                                      unsigned conditionHash) {
+  if (haltedOnError)
+    return;
+  writeUnfinishedPath(state, decision, conditionHash);
+  if (!WriteIncompleteTests)
     return;
   auto dropped = state.copy();
+  if (recordDecisions && decision >= 0)
+    dropped->decisions = std::make_shared<const PathDecision>(
+        dropped->decisions, static_cast<std::uint32_t>(decision),
+        conditionHash);
   dropped->addConstraint(condition);
   interpreterHandler->processTestCase(
       *dropped, "Fork inhibited, the branch is not explored.\n",
@@ -4670,6 +5001,16 @@ void Executor::terminateStateOnError(ExecutionState &state,
 
   if (shouldExitOn(terminationType))
     haltExecution = haltedOnError = true;
+
+  if (killedPathsFile && !haltedOnError && !state.prefixNode &&
+      terminationType > StateTerminationType::USERERR &&
+      terminationType <= StateTerminationType::EXECERR) {
+    // KLEE cannot continue the state, but a seeded state may (see
+    // -seeded-prefix-paths)
+    *killedPathsFile << state.pathString() << '\n';
+    killedPathsFile->flush();
+    message += " (killed path written)";
+  }
 
   bool notemitted = emittedErrors.insert(std::make_pair(lastInst, message)).second;
 
@@ -5791,7 +6132,9 @@ Executor::executeAlloc(ExecutionState &state,
   // make KLEE follow also large sizes and get stuck in the queries over
   // large arrays during the seeding. The returned object is the one of
   // `state`.
-  if (!isa<ConstantExpr>(size)) {
+  // (Not when recording the paths: the fork would be a decision that
+  // depends on the seed, so the paths would depend on the seeds.)
+  if (!isa<ConstantExpr>(size) && !recordDecisions) {
     if (ref<ConstantExpr> seedSize = getValueFromSeeds(state, size)) {
       ref<Expr> isSeedSize = EqExpr::create(size, seedSize);
       StatePair sizes = fork(state, isSeedSize, true, BranchType::Alloc);

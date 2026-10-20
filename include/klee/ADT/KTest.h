@@ -21,6 +21,10 @@ extern "C" {
     unsigned char *bytes;
   };
   
+  /* the name of the object with the path of the test (the decisions at
+     symbolic branches, see -write-unfinished-paths), it is not an input */
+#define KTEST_PATH_OBJECT "klee_path"
+
   typedef struct KTest KTest;
   struct KTest {
     /* file format version */

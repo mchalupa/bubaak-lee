@@ -1025,7 +1025,14 @@ void KleeHandler::processTestCase(const ExecutionState &state,
 
     if (success) {
       if (WriteKTests) {
-        if (writeTestCaseKTest(assignments, test_id)) {
+        auto objects = assignments;
+        if (state.decisions) {
+          // the path of the test (-write-unfinished-paths), not an input
+          std::string path = state.pathString();
+          objects.emplace_back(KTEST_PATH_OBJECT,
+                               std::vector<unsigned char>(path.begin(), path.end()));
+        }
+        if (writeTestCaseKTest(objects, test_id)) {
           atLeastOneGenerated = true;
         }
       }
