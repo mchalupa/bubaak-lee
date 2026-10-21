@@ -4751,10 +4751,13 @@ Executor::StringCheck Executor::checkString(ExecutionState &state,
   uint64_t size = sizeCE->getZExtValue();
   uint64_t offset = offCE->getZExtValue();
   if (offset >= size)
-    return StringCheck::Unterminated;
+    return StringCheck::OutOfBounds; // (also a negative offset)
 
   std::string str;
   bool symbolic = false;
+  // a concrete byte that may not have been written (its real value is
+  // unknown, it may be zero)
+  bool uninitialized = false;
   ref<Expr> someZero = ConstantExpr::alloc(0, Expr::Bool);
   for (uint64_t i = offset; i < size; ++i) {
     ref<Expr> byte = os->read8(i).getValue();
@@ -4767,20 +4770,31 @@ Executor::StringCheck Executor::checkString(ExecutionState &state,
         }
         return StringCheck::Terminated;
       }
-      str += static_cast<char>(ce->getZExtValue(8));
+      uint8_t value = ce->getZExtValue(8);
+      if (os->mayBeUninitializedByte(value))
+        uninitialized = true;
+      str += static_cast<char>(value);
     } else {
       symbolic = true;
       someZero = OrExpr::create(someZero, Expr::createIsZero(byte));
     }
   }
   if (!symbolic)
-    return StringCheck::Unterminated;
+    return uninitialized ? StringCheck::Unterminated
+                         : StringCheck::OutOfBounds;
   // is there a zero byte on all paths?
   bool mustTerminate = false;
   if (solver->mustBeTrue(state.constraints, someZero, mustTerminate,
                          state.queryMetaData) &&
       mustTerminate)
     return StringCheck::Terminated;
+  // is there a zero byte on some path?
+  bool mayTerminate = true;
+  if (!uninitialized &&
+      solver->mayBeTrue(state.constraints, someZero, mayTerminate,
+                        state.queryMetaData) &&
+      !mayTerminate)
+    return StringCheck::OutOfBounds;
   return StringCheck::Unknown;
 }
 
@@ -4837,10 +4851,27 @@ bool Executor::checkOutputCall(ExecutionState &state, const std::string &name,
           state, KValue(toUnique(state, arguments[idx].getSegment()),
                         toUnique(state, arguments[idx].getOffset())));
       return false;
+    case StringCheck::OutOfBounds:
+      // the function reads out of the object on every path (all the bytes
+      // up to the end of the object were written and are not zero)
+      terminateStateOnProgramError(
+          state, "memory error: out of bound pointer",
+          StateTerminationType::Ptr,
+          getKValueInfo(state,
+                        KValue(toUnique(state, arguments[idx].getSegment()),
+                               toUnique(state, arguments[idx].getOffset()))));
+      return false;
     case StringCheck::Unterminated:
-      // The reads of the printing functions are not checked (the reference
-      // verdicts of SV-COMP do not count them), but the string cannot be
-      // printed natively (the function would read out of the object)
+      // The string is not terminated in the object, but some of its bytes
+      // may not be initialized (uninitialized memory is concrete in KLEE,
+      // the written bytes are not tracked). If such a byte is not
+      // initialized, the function reads out of the object on some
+      // executions (the byte has any value), but the reference verdicts of
+      // SV-COMP do not count it consistently. Not an error, but the read
+      // is not checked: the absence of errors is not proved anymore. The
+      // string cannot be printed natively (the function would read out of
+      // the object).
+      reportUnderApproximation(name);
       unterminated = true;
       return true;
     }
