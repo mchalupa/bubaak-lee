@@ -128,6 +128,13 @@ cl::opt<std::string> MaxTime(
     cl::cat(TerminationCat));
 
 /*** Misc options ***/
+cl::opt<bool> MainArgsUnderApprox(
+    "main-args-underapprox",
+    cl::desc("Report an under-approximation if the entry function reads its "
+             "arguments (argc, argv, envp), which are concrete "
+             "(default=true)"),
+    cl::init(true), cl::cat(MiscCat));
+
 cl::opt<bool> SingleObjectResolution(
     "single-object-resolution",
     cl::desc("Try to resolve memory reads/writes to single objects "
@@ -5929,6 +5936,34 @@ void Executor::executeMakeConcrete(ExecutionState &state,
 
 /***/
 
+// Does the program read the argument? At -O0 an unused argument is still
+// stored into an alloca, which is then used only by debug and lifetime
+// intrinsics.
+static bool isArgumentRead(const Argument &arg) {
+  for (const User *u : arg.users()) {
+    auto *store = dyn_cast<StoreInst>(u);
+    if (!store || store->getValueOperand() != &arg)
+      return true;
+    auto *alloca = dyn_cast<AllocaInst>(store->getPointerOperand());
+    if (!alloca)
+      return true;
+    for (const User *au : alloca->users()) {
+      if (auto *s = dyn_cast<StoreInst>(au)) {
+        if (s->getPointerOperand() == alloca && s->getValueOperand() == &arg)
+          continue;
+        return true;
+      }
+      if (isa<DbgInfoIntrinsic>(au))
+        continue;
+      if (auto *ii = dyn_cast<IntrinsicInst>(au))
+        if (ii->isLifetimeStartOrEnd())
+          continue;
+      return true;
+    }
+  }
+  return false;
+}
+
 void Executor::runFunctionAsMain(Function *f,
 				 int argc,
 				 char **argv,
@@ -5952,6 +5987,11 @@ void Executor::runFunctionAsMain(Function *f,
   unsigned NumPtrBytes = Context::get().getPointerWidth() / 8;
   KFunction *kf = kmodule->functionMap[f];
   assert(kf);
+  // The arguments are the given concrete ones, while the program must be
+  // correct for any arguments
+  if (MainArgsUnderApprox &&
+      std::any_of(f->arg_begin(), f->arg_end(), isArgumentRead))
+    reportUnderApproximation("main arguments");
   Function::arg_iterator ai = f->arg_begin(), ae = f->arg_end();
   if (ai!=ae) {
     arguments.push_back(KValue(ConstantExpr::alloc(argc, Expr::Int32)));
