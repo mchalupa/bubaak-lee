@@ -453,6 +453,15 @@ public:
   // make contents all concrete and random
   void initializeToRandom();
 
+  // Can a concrete byte of value `value` be a byte that was never written
+  // (the bytes of an object that is not initialized have the value that
+  // initializeToRandom gives them)? The written bytes are not tracked, so a
+  // written byte of the same value cannot be told apart.
+  bool mayBeUninitializedByte(uint8_t value) const {
+    return offsetPlane->initialValue != 0 &&
+           value == offsetPlane->initialValue;
+  }
+
   void flushToConcreteStore(Executor &executor, ExecutionState &state,
                             bool concretize) {
     offsetPlane->flushToConcreteStore(executor, state, concretize);

@@ -266,8 +266,17 @@ private:
 
   /// The result of checking a string argument of an external function
   /// (Invalid: the pointer points to an object that does not exist, e.g., a
-  /// dead local variable or a freed object)
-  enum class StringCheck { Terminated, Unterminated, Unknown, Invalid };
+  /// dead local variable or a freed object; OutOfBounds: the pointer is out
+  /// of its object or the string is not terminated in the object on any
+  /// path; Unterminated: the string is not terminated in the object, but
+  /// it has bytes that may not be initialized)
+  enum class StringCheck {
+    Terminated,
+    Unterminated,
+    OutOfBounds,
+    Unknown,
+    Invalid
+  };
 
   /// Check that the string at the address is terminated inside its object
   /// (if it is, its contents are stored to `contents` when concrete).
