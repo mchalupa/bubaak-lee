@@ -265,12 +265,24 @@ private:
   static void reportUnderApproximation(const std::string &name);
 
   /// The result of checking a string argument of an external function
-  enum class StringCheck { Terminated, Unterminated, Unknown };
+  /// (Invalid: the pointer points to an object that does not exist, e.g., a
+  /// dead local variable or a freed object)
+  enum class StringCheck { Terminated, Unterminated, Unknown, Invalid };
 
   /// Check that the string at the address is terminated inside its object
   /// (if it is, its contents are stored to `contents` when concrete).
   StringCheck checkString(ExecutionState &state, const Cell &address,
                           std::string *contents, bool &concrete);
+
+  /// Does the pointer have a constant segment of an ordinary object (memory
+  /// on the stack, heap or a global) that is not alive (it was freed or it
+  /// went out of scope)?
+  bool pointsToDeadObject(ExecutionState &state, const KValue &pointer);
+
+  /// Terminate the state with a memory error (use after free or out of bound
+  /// pointer) for an access to the memory of a dead object
+  void terminateStateOnDeadObject(ExecutionState &state,
+                                  const KValue &pointer);
 
   /// Check the memory that a printing function (printf, puts, ...) reads.
   /// Sets `hasWrite` if the call writes memory (%n), `unknown` if the
