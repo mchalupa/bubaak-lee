@@ -4636,6 +4636,12 @@ static const std::set<std::string> outputExternals({"printf", "fprintf", "puts",
                                                     "putchar", "fputs", "fputc",
                                                     "putc"});
 
+// The allowed external functions that access the memory pointed to by every
+// pointer argument that they get (the pointer must not be dangling)
+static const std::set<std::string> derefExternals({"strstr", "strtoll",
+                                                   "strtoul", "frexp", "modf",
+                                                   "modff", "modfl"});
+
 // The functions that print wide strings (they are not executed natively)
 static const std::set<std::string> wideOutputExternals(
     {"wprintf", "fwprintf", "putwchar", "fputwc", "putwc", "fputws"});
@@ -4719,8 +4725,12 @@ Executor::StringCheck Executor::checkString(ExecutionState &state,
 
   ObjectPair op;
   KValue pointer(segment, offsetExpr);
-  if (!state.addressSpace.resolveOneConstantSegment(pointer, op))
+  if (!state.addressSpace.resolveOneConstantSegment(pointer, op)) {
+    // an object that was freed or that went out of scope
+    if (cast<ConstantExpr>(segment)->getZExtValue() >= FIRST_ORDINARY_SEGMENT)
+      return StringCheck::Invalid;
     return StringCheck::Unknown;
+  }
   const MemoryObject *mo = op.first;
   const ObjectState *os = op.second;
   ref<Expr> sizeExpr = mo->size;
@@ -4765,6 +4775,27 @@ Executor::StringCheck Executor::checkString(ExecutionState &state,
   return StringCheck::Unknown;
 }
 
+bool Executor::pointsToDeadObject(ExecutionState &state,
+                                  const KValue &pointer) {
+  auto *segment = dyn_cast<ConstantExpr>(pointer.getSegment());
+  if (!segment || segment->getZExtValue() < FIRST_ORDINARY_SEGMENT)
+    return false;
+  ObjectPair op;
+  return !state.addressSpace.resolveOneConstantSegment(pointer, op);
+}
+
+void Executor::terminateStateOnDeadObject(ExecutionState &state,
+                                          const KValue &pointer) {
+  uint64_t seg = cast<ConstantExpr>(pointer.getSegment())->getZExtValue();
+  // the same errors as in executeMemoryOperation
+  terminateStateOnProgramError(
+      state,
+      state.addressSpace.removedObjectsMap.count(seg)
+          ? "memory error: use after free"
+          : "memory error: out of bound pointer",
+      StateTerminationType::Ptr, getKValueInfo(state, pointer));
+}
+
 bool Executor::checkOutputCall(ExecutionState &state, const std::string &name,
                                const std::vector<Cell> &arguments,
                                bool &hasWrite, bool &unknown,
@@ -4791,6 +4822,12 @@ bool Executor::checkOutputCall(ExecutionState &state, const std::string &name,
     case StringCheck::Unknown:
       unknown = true;
       return true;
+    case StringCheck::Invalid:
+      // the function would read the memory of a dead object
+      terminateStateOnDeadObject(
+          state, KValue(toUnique(state, arguments[idx].getSegment()),
+                        toUnique(state, arguments[idx].getOffset())));
+      return false;
     case StringCheck::Unterminated:
       // The reads of the printing functions are not checked (the reference
       // verdicts of SV-COMP do not count them), but the string cannot be
@@ -4804,7 +4841,8 @@ bool Executor::checkOutputCall(ExecutionState &state, const std::string &name,
   if (name == "putchar" || name == "fputc" || name == "putc")
     return true;
   if (name == "puts" || name == "fputs") {
-    check(0, nullptr);
+    if (!check(0, nullptr))
+      return false;
     if (unterminated)
       symbolicContents = true;
     return true;
@@ -5128,6 +5166,25 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
           }
 
           klee_warning_once(callable, "passing pointer to external call, may not work properly");
+        } else if (KValue pointer(segmentExpr, ai->getOffset());
+                   pointsToDeadObject(state, pointer)) {
+          // A pointer to an object that was freed or that went out of scope.
+          // The function would get only its offset (an invalid address).
+          if (derefExternals.count(name) > 0) {
+            // the function reads or writes the memory of the object
+            terminateStateOnDeadObject(state, pointer);
+            return;
+          }
+          if (!checkedOutput) {
+            // we do not know whether the function accesses the memory
+            terminateStateOnError(state,
+                                  "failed external call: " + name +
+                                      " (a pointer to a dead object)",
+                                  StateTerminationType::External);
+            return;
+          }
+          // a printing function whose reads were checked (checkOutputCall):
+          // the pointer is only printed (%p), its value does not matter
         }
       }
 
