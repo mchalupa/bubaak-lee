@@ -4398,6 +4398,19 @@ void Executor::terminateStateOnError(ExecutionState &state,
                                      StateTerminationType terminationType,
                                      const llvm::Twine &info,
                                      const char *suffix) {
+  if (!state.overApproximation.empty() &&
+      terminationType > StateTerminationType::SOLVERERR &&
+      terminationType <= StateTerminationType::PROGERR) {
+    // the error may not be real, kill the state instead of reporting it
+    // (the message must not look like an error of the program)
+    terminateStateOnExecError(state,
+                              "over-approximated path (" +
+                                  state.overApproximation +
+                                  "), its error is not reported",
+                              StateTerminationType::External);
+    return;
+  }
+
   std::string message = messaget.str();
   static std::set< std::pair<Instruction*, std::string> > emittedErrors;
   Instruction * lastInst;
@@ -4947,6 +4960,16 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
         // we assume that the function is pure, so it is safe to skip it
         // since it does not return a value
         return;
+    }
+
+    if (isa<InlineAsm>(callable->getValue()) &&
+        state.overApproximation.empty()) {
+      // inline assembly computes a particular value, a nondet value
+      // over-approximates it: the paths that continue from here may be
+      // infeasible
+      state.overApproximation = "the result of inline assembly";
+      klee_warning_once(target, "over-approximation: the result of inline "
+                                "assembly is a nondet value");
     }
 
     // the function returns something

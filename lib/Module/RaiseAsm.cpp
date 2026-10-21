@@ -50,12 +50,70 @@ Function *RaiseAsmPass::getIntrinsic(llvm::Module &M, unsigned IID, Type **Tys,
 #endif
 }
 
-static bool isnumber(const std::string& str) {
-  for (unsigned char c : str) {
-    if (!isdigit(c)) {
+// Lower an inline assembly with an empty string: it computes nothing, so an
+// output that is tied to an input (e.g., "+r"(x), which is "=r,0") keeps the
+// value of that input, and the indirect outputs (memory) keep their contents.
+// Returns false (and leaves the call untouched) if some direct output is not
+// tied to an input: its value is unknown.
+static bool lowerEmptyAsm(CallInst *ci, InlineAsm *ia) {
+  const auto constraints = ia->ParseConstraints();
+
+  // the index of the call argument of every constraint that takes one
+  // (inputs and indirect outputs), -1 for the other constraints
+  std::vector<int> argIndex(constraints.size(), -1);
+  unsigned args = 0;
+  for (unsigned i = 0; i < constraints.size(); ++i) {
+    const auto &constr = constraints[i];
+    if (constr.Type == InlineAsm::isInput ||
+        (constr.Type == InlineAsm::isOutput && constr.isIndirect))
+      argIndex[i] = args++;
+  }
+  if (args != ci->arg_size())
+    return false;
+
+  // the values of the direct outputs (the results of the call), in order
+  std::vector<Value *> outputs;
+  for (const auto &constr : constraints) {
+    if (constr.Type != InlineAsm::isOutput || constr.isIndirect)
+      continue;
+    // MatchingInput is the index of the tied input among the constraints
+    if (!constr.hasMatchingInput() ||
+        static_cast<unsigned>(constr.MatchingInput) >= constraints.size() ||
+        argIndex[constr.MatchingInput] < 0)
+      return false;
+    outputs.push_back(ci->getArgOperand(argIndex[constr.MatchingInput]));
+  }
+
+  Type *retTy = ci->getType();
+  StructType *structTy = dyn_cast<StructType>(retTy);
+  if (retTy->isVoidTy()) {
+    if (!outputs.empty())
+      return false;
+  } else if (outputs.size() == 1 && outputs[0]->getType() == retTy) {
+    structTy = nullptr;
+  } else {
+    // several outputs are returned in a struct
+    if (!structTy || structTy->getNumElements() != outputs.size())
+      return false;
+    for (unsigned i = 0; i < outputs.size(); ++i) {
+      if (outputs[i]->getType() != structTy->getElementType(i))
         return false;
     }
   }
+
+  IRBuilder<> Builder(ci);
+  if (ia->hasSideEffects())
+    Builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent);
+  if (!retTy->isVoidTy()) {
+    Value *result = outputs[0];
+    if (structTy) {
+      result = UndefValue::get(structTy);
+      for (unsigned i = 0; i < outputs.size(); ++i)
+        result = Builder.CreateInsertValue(result, outputs[i], i);
+    }
+    ci->replaceAllUsesWith(result);
+  }
+  ci->eraseFromParent();
   return true;
 }
 
@@ -86,49 +144,8 @@ bool RaiseAsmPass::runOnInstruction(Module &M, Instruction *I) {
        triple.getArch() == llvm::Triple::x86_64) &&
       (triple.isOSLinux() || triple.isMacOSX() || triple.isOSFreeBSD())) {
 
-    if (ia->getAsmString() == "" && ia->hasSideEffects() &&
-        ia->getFunctionType()->getReturnType()->isVoidTy()) {
-      IRBuilder<> Builder(I);
-      Builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent);
-      // try to match the output of asm
-      Value *retval = nullptr;
-      const auto& constraints = ia->ParseConstraints();
-      for (auto& constr : constraints) {
-          if (constr.MatchingInput >= 0) {
-            retval = I->getOperand(constr.MatchingInput);
-            auto bw = I->getType()->getScalarSizeInBits();
-            if (bw == 0)
-                continue;
-
-            if (constraints[constr.MatchingInput].Codes.size() != 1)
-                continue;
-
-            const auto& inputstr = constraints[constr.MatchingInput].Codes[0];
-            if (!isnumber(inputstr))
-                continue;
-
-            APInt inputval(bw,
-                           constraints[constr.MatchingInput].Codes[0],
-                           10);
-            auto opval = inputval.getZExtValue();
-            if (I->getNumOperands() <= opval) {
-                llvm::errs() << I << "\n";
-                llvm::errs() << "Invalid operand num for inline asm: "
-                             << inputval;
-                continue;
-            }
-            retval = I->getOperand(opval);
-            break;
-          }
-      }
-      if (retval) {
-        I->replaceAllUsesWith(retval);
-      } else {
-        I->replaceAllUsesWith(UndefValue::get(I->getType()));
-      }
-      I->eraseFromParent();
+    if (ia->getAsmString().empty() && lowerEmptyAsm(ci, ia))
       return true;
-    }
   }
 
   return false;

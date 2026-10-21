@@ -116,6 +116,7 @@ ExecutionState::ExecutionState(const ExecutionState& state):
                              : nullptr),
     coveredNew(state.coveredNew),
     forkDisabled(state.forkDisabled),
+    overApproximation(state.overApproximation),
     base_addrs(state.base_addrs),
     base_mos(state.base_mos) {
   for (const auto &cur_mergehandler: openMergeStack)
