@@ -1039,6 +1039,13 @@ void SpecialFunctionHandler::handleVerifierNondetType(ExecutionState &state,
                                                       bool isSigned,
                                                       const std::string& name,
                                                       bool isPointer) {
+  // the width of long, pointers, etc. depends on the target (e.g., 32 bits on
+  // i386), take it from the call, a wider value would overflow the variable
+  // that it is stored to
+  llvm::Type *retTy = target->inst->getType();
+  if (retTy->isSized())
+    size = executor.kmodule->targetData->getTypeSizeInBits(retTy);
+
   // create nondet value if we are not replaying
   if (executor.replayNondet.empty()) {
     executor.bindLocal(target, state,
