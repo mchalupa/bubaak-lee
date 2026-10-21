@@ -4270,6 +4270,7 @@ void Executor::terminateStateOnExit(ExecutionState &state) {
       }
       terminateStateOnProgramError(state, "memory error: memory not cleaned up",
                                    StateTerminationType::Leak, info);
+      return;
     } else {
       assert(CheckLeaks);
       auto leaks = getMemoryLeaks(state);
@@ -4293,18 +4294,19 @@ void Executor::terminateStateOnExit(ExecutionState &state) {
         }
       }
 
-      // all good, just terminate the state
-      terminateState(state, StateTerminationType::Exit);
+      // All the unfreed memory is still reachable (from globals or from the
+      // frames on the stack), which is not a leak (only valid-memcleanup
+      // requires freeing it). This is an ordinary exit, the path is complete.
     }
-  } else {
-    if (ExitOnErrorType.empty() &&
-        (shouldWriteTest(state) || (AlwaysOutputSeeds && seedMap.count(&state))))
-      interpreterHandler->processTestCase(
-          state, nullptr,
-          terminationTypeFileExtension(StateTerminationType::Exit).c_str());
-    interpreterHandler->incPathsCompleted();
-    terminateState(state, StateTerminationType::Exit);
   }
+
+  if (ExitOnErrorType.empty() &&
+      (shouldWriteTest(state) || (AlwaysOutputSeeds && seedMap.count(&state))))
+    interpreterHandler->processTestCase(
+        state, nullptr,
+        terminationTypeFileExtension(StateTerminationType::Exit).c_str());
+  interpreterHandler->incPathsCompleted();
+  terminateState(state, StateTerminationType::Exit);
 }
 
 void Executor::terminateStateEarly(ExecutionState &state, const Twine &message,
