@@ -202,10 +202,13 @@ public:
     }
   }
   ref<Expr> getBoundsCheckOffset(ref<Expr> offset, unsigned bytes) const {
-    return UltExpr::create(offset,
-                           SubExpr::create(size,
-                                           ConstantExpr::alloc(bytes - 1,
-                                                               size->getWidth())));
+    // size - (bytes - 1) wraps if the object is smaller than the access
+    return AndExpr::create(
+        UgeExpr::create(size, ConstantExpr::alloc(bytes, size->getWidth())),
+        UltExpr::create(offset,
+                        SubExpr::create(size,
+                                        ConstantExpr::alloc(bytes - 1,
+                                                            size->getWidth()))));
   }
 
   /// Compare this object with memory object b.
