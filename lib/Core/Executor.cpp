@@ -181,6 +181,14 @@ cl::opt<bool> DumpStatesUnlessExitOnError(
              "(default=false)"),
     cl::cat(TestGenCat));
 
+cl::opt<bool> WriteExitTests(
+    "write-exit-tests",
+    cl::init(false),
+    cl::desc("Generate a test case for every completed path (the program "
+             "exited) even if -exit-on-error-type is given, e.g., to generate "
+             "a test suite while searching for an error (default=false)"),
+    cl::cat(TestGenCat));
+
 cl::opt<bool> OnlyOutputStatesCoveringNew(
     "only-output-states-covering-new",
     cl::init(false),
@@ -4307,7 +4315,7 @@ void Executor::terminateStateOnExit(ExecutionState &state) {
     }
   }
 
-  if (ExitOnErrorType.empty() &&
+  if ((ExitOnErrorType.empty() || WriteExitTests) &&
       (shouldWriteTest(state) || (AlwaysOutputSeeds && seedMap.count(&state))))
     interpreterHandler->processTestCase(
         state, nullptr,
