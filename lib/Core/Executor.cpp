@@ -189,6 +189,18 @@ cl::opt<bool> WriteExitTests(
              "a test suite while searching for an error (default=false)"),
     cl::cat(TestGenCat));
 
+cl::opt<bool> WriteKillTests(
+    "write-kill-tests",
+    cl::init(false),
+    cl::desc("Generate a test case for every state that KLEE cannot continue "
+             "precisely, i.e., a state whose expression is concretized (the "
+             "state goes on with the concrete value) or that is killed by an "
+             "execution or external call error, and print the line \"Wrote "
+             "kill test: FILE (type: TYPE, reason: MESSAGE)\" so that "
+             "another tool can continue from the state. No test is written "
+             "after the execution halted on an error (default=false)"),
+    cl::cat(TestGenCat));
+
 cl::opt<bool> OnlyOutputStatesCoveringNew(
     "only-output-states-covering-new",
     cl::init(false),
@@ -1502,6 +1514,17 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
     if (!pathfile.empty())
       klee_warning("Dumped unfinished path to file: %s (reason: %s)",
                    pathfile.c_str(), reason.c_str());
+  }
+
+  // write a test of the path condition up to here (without the constraint
+  // of the concretization) so that another tool can continue from the state
+  if (WriteKillTests && !haltedOnError) {
+    const auto &testfile = interpreterHandler->writeKillTest(
+        state, ("Concretized (reason: " + reason + ")\n").c_str(),
+        "concretized");
+    if (!testfile.empty())
+      klee_warning("Wrote kill test: %s (type: concretized, reason: %s)",
+                   testfile.c_str(), reason.c_str());
   }
 
   if (concretize)
@@ -4247,7 +4270,8 @@ Executor::getReachableMemoryObjects(ExecutionState &state,
 void Executor::reportError(const llvm::Twine &message,
                            const ExecutionState &state, const llvm::Twine &info,
                            const char *suffix,
-                           enum StateTerminationType terminationType) {
+                           enum StateTerminationType terminationType,
+                           bool killTest) {
   Instruction *lastInst;
   const InstructionInfo &ii = getLastNonKleeInternalInstruction(state, &lastInst);
 
@@ -4270,6 +4294,19 @@ void Executor::reportError(const llvm::Twine &message,
   const std::string ext = terminationTypeFileExtension(terminationType);
   // use user provided suffix from klee_report_error()
   const char * file_suffix = suffix ? suffix : ext.c_str();
+  if (killTest) {
+    const auto &testfile =
+        interpreterHandler->writeKillTest(state, msg.str().c_str(), file_suffix);
+    if (!testfile.empty()) {
+      // the type is the extension of the termination type without ".err"
+      std::string type = ext;
+      if (type.size() > 4 && type.compare(type.size() - 4, 4, ".err") == 0)
+        type.resize(type.size() - 4);
+      klee_warning("Wrote kill test: %s (type: %s, reason: %s)",
+                   testfile.c_str(), type.c_str(), message.str().c_str());
+    }
+    return;
+  }
   interpreterHandler->processTestCase(state, msg.str().c_str(), file_suffix);
 }
 
@@ -4473,13 +4510,23 @@ void Executor::terminateStateOnError(ExecutionState &state,
   // process the testcase if we either should emit all errors, or if we search
   // for a specific error and this is the error (haltExecution is set to true),
   // or if we do not search for a specific error and we haven't emitted this error yet
+  // (with -write-kill-tests, the test of a state killed by an execution error
+  // is written as a kill test, only once)
+  const bool killTest = WriteKillTests && !haltedOnError &&
+                        terminationType > StateTerminationType::USERERR &&
+                        terminationType <= StateTerminationType::EXECERR;
+  bool reported = true;
   if (EmitAllErrors || haltExecution || (ExitOnErrorType.empty() && notemitted)) {
-    reportError(messaget, state, info, suffix, terminationType);
+    reportError(messaget, state, info, suffix, terminationType, killTest);
   } else if (WriteIncompleteTests && !haltedOnError &&
              isIncompleteTermination(terminationType)) {
     // KLEE does not explore the paths that continue from this state
-    reportError(messaget, state, info, suffix, terminationType);
+    reportError(messaget, state, info, suffix, terminationType, killTest);
+  } else {
+    reported = false;
   }
+  if (killTest && !reported)
+    reportError(messaget, state, info, suffix, terminationType, true);
 
   // KLEE does not explore the paths that continue from a state killed by an
   // execution error (e.g., an unsupported instruction); dump its path so

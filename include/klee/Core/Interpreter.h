@@ -50,6 +50,15 @@ public:
                                const char *suffix) = 0;
 
   virtual std::string dumpPath(const ExecutionState& state) = 0;
+
+  /// Write a test case for a state that the interpreter cannot continue
+  /// precisely (processTestCase with the message and the suffix of the file
+  /// with the message). Return the absolute path of the written .ktest file
+  /// or an empty string if no such file was written.
+  virtual std::string writeKillTest(const ExecutionState &state,
+                                    const char *message, const char *suffix) {
+    return "";
+  }
 };
 
 class Interpreter {

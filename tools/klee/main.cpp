@@ -50,6 +50,8 @@ DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 
@@ -405,6 +407,9 @@ public:
   void setInterpreter(Interpreter *i);
 
   std::string dumpPath(const ExecutionState& state);
+
+  std::string writeKillTest(const ExecutionState &state, const char *message,
+                            const char *suffix);
 
   void processTestCase(const ExecutionState  &state,
                        const char *errorMessage,
@@ -947,6 +952,19 @@ void KleeHandler::writeWitnessYAML(const ExecutionState &state, unsigned id) {
          "        type: target\n"
          "        action: follow\n";
   writeWitnessLocation(out, *target);
+}
+
+std::string KleeHandler::writeKillTest(const ExecutionState &state,
+                                       const char *message,
+                                       const char *suffix) {
+  processTestCase(state, message, suffix);
+  // the test just written has the id m_numTotalTests
+  std::string file = getOutputFilename(getTestFilename("ktest", m_numTotalTests));
+  if (!llvm::sys::fs::exists(file))
+    return "";
+  llvm::SmallString<256> abs(file);
+  llvm::sys::fs::make_absolute(abs);
+  return std::string(abs.str());
 }
 
 /* Outputs all files (.ktest, .kquery, .cov etc.) describing a test case */

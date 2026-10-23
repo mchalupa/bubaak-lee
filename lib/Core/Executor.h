@@ -589,7 +589,8 @@ private:
 
   void reportError(const llvm::Twine &message, const ExecutionState &state,
                    const llvm::Twine &info, const char *suffix,
-                   enum StateTerminationType terminationType);
+                   enum StateTerminationType terminationType,
+                   bool killTest = false);
 
   /// check memory usage and terminate states when over threshold of -max-memory + 100MB
   /// \return true if below threshold, false otherwise (states were terminated)
