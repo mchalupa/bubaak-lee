@@ -172,12 +172,21 @@ cl::opt<unsigned> MaxDumpedStates(
              "without a test case. Set to 0 to dump all states (default=0)"),
     cl::cat(TestGenCat));
 
+cl::opt<bool> MinimizeTests(
+    "minimize-tests",
+    cl::init(false),
+    cl::desc("Minimize the nondeterministic values of a test case (each value "
+             "takes several solver queries, which can be slow with hard "
+             "constraints). Without it, a test has the values of a single "
+             "model of the path constraints (default=false)"),
+    cl::cat(TestGenCat));
+
 cl::opt<std::string> MaxTestMinimizationTime(
     "max-test-minimization-time",
-    cl::desc("Spend at most this time minimizing the nondeterministic values "
-             "of a test case (each value takes several solver queries), then "
-             "use the values of a model of the path constraints. Set to 0s "
-             "to minimize without a limit (default=0s)"),
+    cl::desc("With -minimize-tests, spend at most this time minimizing the "
+             "nondeterministic values of a test case, then use the values of "
+             "a model of the path constraints. Set to 0s to minimize without "
+             "a limit (default=0s)"),
     cl::cat(TestGenCat));
 
 cl::opt<bool> DumpStatesUnlessExitOnError(
@@ -6339,10 +6348,11 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
   // We cannot use getTestVector(), as the values in .ktest
   // have different endiandness (byte 0 goes first, then byte 1, etc.)
   std::vector<std::pair<ref<ConstantExpr>, ref<ConstantExpr>>> nondets;
-  if (!state.nondetValues.empty() && maxTestMinimizationTime) {
+  if (!state.nondetValues.empty() &&
+      (!MinimizeTests || maxTestMinimizationTime)) {
     // the minimization takes several queries for each value, which can be
-    // too slow with hard constraints. Use the values of a model if it does
-    // not finish in time.
+    // too slow with hard constraints. Use the values of a model if it is off
+    // or does not finish in time.
     if (!assignment) {
       solver->setTimeout(coreSolverTimeout);
       bool success = solver->getInitialValues(extendedConstraints, assignment,
@@ -6355,6 +6365,8 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
     }
     auto deadline = time::getWallTime() + maxTestMinimizationTime;
     for (auto &it : state.nondetValues) {
+      if (!MinimizeTests)
+        break;
       ref<ConstantExpr> value, segment;
       if (!getMinimalValue(extendedConstraints, it.value.getValue(), deadline,
                            state.queryMetaData, value))
@@ -6367,8 +6379,9 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
       nondets.emplace_back(value, segment);
     }
     if (nondets.size() < state.nondetValues.size()) {
-      klee_warning_once(nullptr, "minimizing the values of a test case took "
-                                 "too long, using the values of a model");
+      if (MinimizeTests)
+        klee_warning_once(nullptr, "minimizing the values of a test case took "
+                                   "too long, using the values of a model");
       nondets.clear();
       for (auto &it : state.nondetValues)
         nondets.emplace_back(

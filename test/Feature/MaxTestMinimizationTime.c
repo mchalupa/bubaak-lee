@@ -1,15 +1,24 @@
-// The nondet values are minimized
+// By default, a test has the values of a model, they are not minimized
 // RUN: %clang %s -emit-llvm %O0opt -c -o %t.bc
+// RUN: rm -rf %t.klee-out-0
+// RUN: %klee --output-dir=%t.klee-out-0 %t.bc 2> %t0.err
+// RUN: %ktest-tool %t.klee-out-0/test000001.ktest | FileCheck --check-prefix=CHECK-MODEL %s
+
+// With -minimize-tests, the nondet values are minimized
 // RUN: rm -rf %t.klee-out
-// RUN: %klee --output-dir=%t.klee-out --max-test-minimization-time=60s %t.bc 2> %t1.err
+// RUN: %klee --output-dir=%t.klee-out --minimize-tests %t.bc 2> %t1.err
 // RUN: not grep "minimizing the values" %t1.err
 // RUN: %ktest-tool %t.klee-out/test000001.ktest | FileCheck --check-prefix=CHECK-MIN %s
+// RUN: rm -rf %t.klee-out-1
+// RUN: %klee --output-dir=%t.klee-out-1 --minimize-tests --max-test-minimization-time=60s %t.bc 2> %t1.err
+// RUN: not grep "minimizing the values" %t1.err
+// RUN: %ktest-tool %t.klee-out-1/test000001.ktest | FileCheck --check-prefix=CHECK-MIN %s
 // CHECK-MIN: object 0: int : 42
 // CHECK-MIN: object 1: int : 101
 
 // Without time for the minimization, the values are those of a model
 // RUN: rm -rf %t.klee-out-2
-// RUN: %klee --output-dir=%t.klee-out-2 --max-test-minimization-time=1us %t.bc 2> %t2.err
+// RUN: %klee --output-dir=%t.klee-out-2 --minimize-tests --max-test-minimization-time=1us %t.bc 2> %t2.err
 // RUN: FileCheck --check-prefix=CHECK-WARN --input-file=%t2.err %s
 // RUN: %ktest-tool %t.klee-out-2/test000001.ktest | FileCheck --check-prefix=CHECK-MODEL %s
 // CHECK-WARN: KLEE: WARNING ONCE: minimizing the values of a test case took too long, using the values of a model
