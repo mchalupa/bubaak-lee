@@ -606,7 +606,7 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
       ivcEnabled(false), debugLogBuffer(debugBufferString) {
 
 
-  const time::Span maxTime{MaxTime};
+  maxTime = time::Span{MaxTime};
   if (maxTime) timers.add(
         std::make_unique<Timer>(maxTime, [&]{
         klee_message("HaltTimer invoked");
@@ -1220,13 +1220,36 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
   time::Span timeout = coreSolverTimeout;
   if (isSeeding)
     timeout *= static_cast<unsigned>(it->second.size());
+  // the query does not run past -max-time, the execution halts then (a single
+  // query with hard constraints could delay the halt without a limit)
+  bool haltLimited = false;
+  if (maxTime) {
+    auto deadline = runStartTime + maxTime;
+    auto now = time::getWallTime();
+    // (Z3 takes the timeout in milliseconds, 0 is no timeout)
+    auto left = now + time::milliseconds(1) < deadline ? deadline - now
+                                                       : time::milliseconds(1);
+    if (!timeout || left < timeout) {
+      timeout = left;
+      haltLimited = true;
+    }
+  }
   solver->setTimeout(timeout);
   bool success = solver->evaluate(current.constraints, condition, res,
                                   current.queryMetaData);
   solver->setTimeout(time::Span());
   if (!success) {
     current.pc = current.prevPC;
-    terminateStateOnSolverError(current, "Query timed out (fork).");
+    if (haltLimited) {
+      // the state is one of the states remaining at the halt
+      if (DumpStatesOnHalt)
+        terminateStateEarly(current, "Execution halting.",
+                            StateTerminationType::Interrupted);
+      else
+        terminateState(current, StateTerminationType::Interrupted);
+    } else {
+      terminateStateOnSolverError(current, "Query timed out (fork).");
+    }
     return StatePair(nullptr, nullptr);
   }
 

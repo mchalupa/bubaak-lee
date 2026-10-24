@@ -212,6 +212,9 @@ private:
   /// The time when the execution started
   time::Point runStartTime;
 
+  /// The time after which the execution halts (-max-time), 0 if none
+  time::Span maxTime;
+
   // @brief Buffer used by logBuffer
   std::string debugBufferString;
 
