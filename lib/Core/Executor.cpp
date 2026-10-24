@@ -172,6 +172,14 @@ cl::opt<unsigned> MaxDumpedStates(
              "without a test case. Set to 0 to dump all states (default=0)"),
     cl::cat(TestGenCat));
 
+cl::opt<std::string> MaxTestMinimizationTime(
+    "max-test-minimization-time",
+    cl::desc("Spend at most this time minimizing the nondeterministic values "
+             "of a test case (each value takes several solver queries), then "
+             "use the values of a model of the path constraints. Set to 0s "
+             "to minimize without a limit (default=0s)"),
+    cl::cat(TestGenCat));
+
 cl::opt<bool> DumpStatesUnlessExitOnError(
     "dump-states-unless-exit-on-error",
     cl::init(false),
@@ -617,6 +625,7 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
   }
 
   coreSolverTimeout = time::Span{MaxCoreSolverTime};
+  maxTestMinimizationTime = time::Span{MaxTestMinimizationTime};
   if (coreSolverTimeout) UseForkedCoreSolver = true;
   std::unique_ptr<Solver> coreSolver = klee::createCoreSolver(CoreSolverToUse);
   if (!coreSolver) {
@@ -6306,17 +6315,62 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
   // try to minimize the found values
   // We cannot use getTestVector(), as the values in .ktest
   // have different endiandness (byte 0 goes first, then byte 1, etc.)
-  for (auto& it : state.nondetValues) {
-    auto pair = solver->getRange(
-        extendedConstraints, it.value.getValue(), state.queryMetaData);
-    auto value = pair.first;
-    cm.addConstraint(EqExpr::create(it.value.getValue(), value));
+  std::vector<std::pair<ref<ConstantExpr>, ref<ConstantExpr>>> nondets;
+  if (!state.nondetValues.empty() && maxTestMinimizationTime) {
+    // the minimization takes several queries for each value, which can be
+    // too slow with hard constraints. Use the values of a model if it does
+    // not finish in time.
+    if (!assignment) {
+      solver->setTimeout(coreSolverTimeout);
+      bool success = solver->getInitialValues(extendedConstraints, assignment,
+                                              state.queryMetaData);
+      solver->setTimeout(time::Span());
+      if (!success) {
+        klee_warning("unable to compute initial values (invalid constraints?)!");
+        return false;
+      }
+    }
+    auto deadline = time::getWallTime() + maxTestMinimizationTime;
+    for (auto &it : state.nondetValues) {
+      ref<ConstantExpr> value, segment;
+      if (!getMinimalValue(extendedConstraints, it.value.getValue(), deadline,
+                           state.queryMetaData, value))
+        break;
+      cm.addConstraint(EqExpr::create(it.value.getValue(), value));
+      if (!getMinimalValue(extendedConstraints, it.value.getSegment(),
+                           deadline, state.queryMetaData, segment))
+        break;
+      cm.addConstraint(EqExpr::create(it.value.getSegment(), segment));
+      nondets.emplace_back(value, segment);
+    }
+    if (nondets.size() < state.nondetValues.size()) {
+      klee_warning_once(nullptr, "minimizing the values of a test case took "
+                                 "too long, using the values of a model");
+      nondets.clear();
+      for (auto &it : state.nondetValues)
+        nondets.emplace_back(
+            cast<ConstantExpr>(assignment->evaluate(it.value.getValue())),
+            cast<ConstantExpr>(assignment->evaluate(it.value.getSegment())));
+    }
+  } else {
+    for (auto &it : state.nondetValues) {
+      auto pair = solver->getRange(
+          extendedConstraints, it.value.getValue(), state.queryMetaData);
+      auto value = pair.first;
+      cm.addConstraint(EqExpr::create(it.value.getValue(), value));
 
-    pair = solver->getRange(
-        extendedConstraints, it.value.getSegment(), state.queryMetaData);
-    auto segment = pair.first;
-    cm.addConstraint(EqExpr::create(it.value.getSegment(), segment));
+      pair = solver->getRange(
+          extendedConstraints, it.value.getSegment(), state.queryMetaData);
+      auto segment = pair.first;
+      cm.addConstraint(EqExpr::create(it.value.getSegment(), segment));
+      nondets.emplace_back(value, segment);
+    }
+  }
 
+  for (size_t i = 0; i < state.nondetValues.size(); ++i) {
+    const auto &it = state.nondetValues[i];
+    const auto &value = nondets[i].first;
+    const auto &segment = nondets[i].second;
     std::string descr = it.name;
     if (it.kinstruction) {
       auto *info = it.kinstruction->info;
@@ -6349,6 +6403,70 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
 
     res.push_back(std::make_pair(descr, data));
   }
+  return true;
+}
+
+bool Executor::getMinimalValue(const ConstraintSet &constraints, ref<Expr> e,
+                               time::Point deadline,
+                               SolverQueryMetaData &metaData,
+                               ref<ConstantExpr> &result) {
+  if (auto *CE = dyn_cast<ConstantExpr>(e)) {
+    result = CE;
+    return true;
+  }
+
+  // a query with the time left, false if there is none or it fails
+  auto query = [&](bool must, ref<Expr> cond, bool &res) {
+    // (Z3 takes the timeout in milliseconds, 0 is no timeout)
+    auto now = time::getWallTime();
+    if (now + time::milliseconds(1) >= deadline)
+      return false;
+    solver->setTimeout(deadline - now);
+    bool success = must ? solver->mustBeTrue(constraints, cond, res, metaData)
+                        : solver->mayBeTrue(constraints, cond, res, metaData);
+    solver->setTimeout(time::Span());
+    return success;
+  };
+
+  // the same search for the minimum as in Solver::getRange
+  Expr::Width width = e->getWidth();
+  // binary search for # of useful bits
+  uint64_t lo = 0, hi = width, mid;
+  while (lo < hi) {
+    mid = lo + (hi - lo) / 2;
+    bool res;
+    if (!query(true,
+               EqExpr::create(LShrExpr::create(e, ConstantExpr::create(mid, width)),
+                              ConstantExpr::create(0, width)),
+               res))
+      return false;
+    if (res)
+      hi = mid;
+    else
+      lo = mid + 1;
+  }
+  uint64_t bits = lo;
+
+  bool res;
+  if (!query(false, EqExpr::create(e, ConstantExpr::create(0, width)), res))
+    return false;
+  if (res) {
+    result = ConstantExpr::create(0, width);
+    return true;
+  }
+
+  // binary search for min
+  lo = 0, hi = bits64::maxValueOfNBits(bits);
+  while (lo < hi) {
+    mid = lo + (hi - lo) / 2;
+    if (!query(false, UleExpr::create(e, ConstantExpr::create(mid, width)), res))
+      return false;
+    if (res)
+      hi = mid;
+    else
+      lo = mid + 1;
+  }
+  result = ConstantExpr::create(lo, width);
   return true;
 }
 

@@ -194,6 +194,9 @@ private:
   /// (e.g. for a single STP query)
   time::Span coreSolverTimeout;
 
+  /// The time limit for minimizing the nondeterministic values of a test case
+  time::Span maxTestMinimizationTime;
+
   /// Maximum time to allow for a single instruction.
   time::Span maxInstructionTime;
 
@@ -675,6 +678,12 @@ public:
       const ExecutionState &state,
       std::vector<std::pair<std::string, std::vector<unsigned char>>> &res)
       override;
+
+  /// The minimal (unsigned) value of `e` under `constraints`, false if it is
+  /// not found before `deadline`.
+  bool getMinimalValue(const ConstraintSet &constraints, ref<Expr> e,
+                       time::Point deadline, SolverQueryMetaData &metaData,
+                       ref<ConstantExpr> &result);
 
   // get a sequence of inputs that drive the program to this state
   std::vector<NamedConcreteValue>
