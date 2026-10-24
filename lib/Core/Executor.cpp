@@ -5481,10 +5481,34 @@ Executor::executeAlloc(ExecutionState &state,
   size = optimizer.optimizeExpr(size, true);
   // In seed mode, concretize a symbolic size to the seed value so that
   // subsequent branch conditions on the size are resolved by the seed.
+  // The other sizes are not dropped: an unseeded forked state allocates
+  // them after the seeding. All seeds stay in `state` (the seeds of other
+  // sizes are patched): a seeded state for every size of the seeds would
+  // make KLEE follow also large sizes and get stuck in the queries over
+  // large arrays during the seeding. The returned object is the one of
+  // `state`.
   if (!isa<ConstantExpr>(size)) {
     if (ref<ConstantExpr> seedSize = getValueFromSeeds(state, size)) {
-      addConstraint(state, EqExpr::create(size, seedSize));
-      size = seedSize;
+      ref<Expr> isSeedSize = EqExpr::create(size, seedSize);
+      StatePair sizes = fork(state, isSeedSize, true, BranchType::Alloc);
+      if (sizes.first && sizes.second) {
+        auto it = seedMap.find(sizes.second);
+        if (it != seedMap.end()) {
+          std::vector<SeedInfo> &seeds = seedMap[sizes.first];
+          for (SeedInfo &si : it->second) {
+            si.patchSeed(*sizes.first, isSeedSize, solver.get());
+            seeds.push_back(si);
+          }
+          seedMap.erase(it);
+        }
+        executeAlloc(*sizes.second, size, isLocal, target, zeroMemory,
+                     reallocFrom, allocationAlignment);
+      }
+      if (!sizes.first && !sizes.second)
+        return nullptr;
+      // (if the state cannot have the size of the seed, it stays symbolic)
+      if (sizes.first)
+        size = seedSize;
     }
   }
   const llvm::Value *allocSite = state.prevPC->inst;
