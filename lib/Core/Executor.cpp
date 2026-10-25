@@ -193,6 +193,18 @@ cl::opt<std::string> MaxTestMinimizationTime(
              "to not minimize (default=2s)"),
     cl::cat(TestGenCat));
 
+cl::opt<std::string> MaxDumpMinimizationTime(
+    "max-dump-minimization-time",
+    cl::init("0s"),
+    cl::desc("The total time for minimizing the nondeterministic values of the "
+             "tests of the states dumped on halt (-dump-states-on-halt). When "
+             "it is used up, the other dumped states get the values of a "
+             "single model of their path constraints (no minimization at "
+             "all, not even the query for small values). The limit "
+             "-max-test-minimization-time still applies to each test within "
+             "the budget. Set to 0s for no limit (default=0s)"),
+    cl::cat(TestGenCat));
+
 cl::opt<bool> DumpStatesUnlessExitOnError(
     "dump-states-unless-exit-on-error",
     cl::init(false),
@@ -647,6 +659,7 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
 
   coreSolverTimeout = time::Span{MaxCoreSolverTime};
   maxTestMinimizationTime = time::Span{MaxTestMinimizationTime};
+  maxDumpMinimizationTime = time::Span{MaxDumpMinimizationTime};
   if (coreSolverTimeout) UseForkedCoreSolver = true;
   std::unique_ptr<Solver> coreSolver = klee::createCoreSolver(CoreSolverToUse);
   if (!coreSolver) {
@@ -4028,6 +4041,8 @@ void Executor::doDumpStates() {
     klee_message("halting execution, dumping remaining states");
   }
 
+  dumpingStates = true;
+  dumpMinimizationSpent = time::Span();
   size_t i = 0;
   for (ExecutionState *state : states)
     if (dump[i++])
@@ -4035,6 +4050,7 @@ void Executor::doDumpStates() {
                           StateTerminationType::Interrupted);
     else
       terminateState(*state, StateTerminationType::Interrupted);
+  dumpingStates = false;
 
   updateStates(nullptr);
 }
@@ -6438,12 +6454,22 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
   // solver): the values then come from getFallbackModel. When dumping the
   // states on halt and the budget for the minimization is used up, the values
   // are those of a single model, without any further query.
-  const bool budgetUsedUp = false;
+  const bool budgetUsedUp = dumpingStates && maxDumpMinimizationTime &&
+                            dumpMinimizationSpent >= maxDumpMinimizationTime;
   const auto minimizationStart = time::getWallTime();
+  auto accountMinimization = [&]() {
+    if (dumpingStates)
+      dumpMinimizationSpent += time::getWallTime() - minimizationStart;
+  };
   // the deadline of the minimization of this test
   time::Span minimizationTime =
       maxTestMinimizationTime ? maxTestMinimizationTime
                               : time::seconds(3600 * 24 * 365);
+  if (dumpingStates && maxDumpMinimizationTime) {
+    auto left = maxDumpMinimizationTime - dumpMinimizationSpent;
+    if (!budgetUsedUp && left < minimizationTime)
+      minimizationTime = left;
+  }
   const auto deadline = minimizationStart + minimizationTime;
 
   ConstraintSet extendedConstraints(state.constraints);
@@ -6571,6 +6597,7 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
                                    "too long, using the values of a model");
     }
   }
+  accountMinimization();
 
   for (size_t i = 0; i < state.nondetValues.size(); ++i) {
     const auto &it = state.nondetValues[i];

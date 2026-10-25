@@ -198,6 +198,13 @@ private:
   /// The time limit for minimizing the nondeterministic values of a test case
   time::Span maxTestMinimizationTime;
 
+  /// The time limit for minimizing the values of all the tests written when
+  /// halting (0: no limit), the time spent so far, and whether the states are
+  /// being dumped on halt
+  time::Span maxDumpMinimizationTime;
+  time::Span dumpMinimizationSpent;
+  bool dumpingStates = false;
+
   /// A solver query failed (timed out) in a function that cannot terminate the
   /// state (e.g., toConstant, which must return a value). The state is
   /// terminated as soon as possible (when an instruction ends, or when
