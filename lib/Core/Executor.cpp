@@ -224,6 +224,14 @@ cl::opt<bool> OnlyOutputStatesCoveringNew(
     cl::desc("Only output test cases covering new code (default=false)"),
     cl::cat(TestGenCat));
 
+cl::opt<bool> OnlyOutputExitsCoveringNew(
+    "only-output-exits-covering-new",
+    cl::init(false),
+    cl::desc("Only output test cases of completed paths (the program exited) "
+             "that cover new code, the test cases of the other states are "
+             "not affected (default=false)"),
+    cl::cat(TestGenCat));
+
 cl::opt<bool> EmitAllErrors(
     "emit-all-errors", cl::init(false),
     cl::desc("Generate tests cases for all errors "
@@ -655,6 +663,8 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
 
   if (OnlyOutputStatesCoveringNew && !StatsTracker::useIStats())
     klee_error("To use --only-output-states-covering-new, you need to enable --output-istats.");
+  if (OnlyOutputExitsCoveringNew && !StatsTracker::useIStats())
+    klee_error("To use --only-output-exits-covering-new, you need to enable --output-istats.");
 
   if (DebugPrintInstructions.isSet(FILE_ALL) ||
       DebugPrintInstructions.isSet(FILE_COMPACT) ||
@@ -4394,7 +4404,9 @@ void Executor::terminateStateOnExit(ExecutionState &state) {
   }
 
   if ((ExitOnErrorType.empty() || WriteExitTests) &&
-      (shouldWriteTest(state) || (AlwaysOutputSeeds && seedMap.count(&state))))
+      ((shouldWriteTest(state) &&
+        (!OnlyOutputExitsCoveringNew || state.coveredNew)) ||
+       (AlwaysOutputSeeds && seedMap.count(&state))))
     interpreterHandler->processTestCase(
         state, nullptr,
         terminationTypeFileExtension(StateTerminationType::Exit).c_str());
