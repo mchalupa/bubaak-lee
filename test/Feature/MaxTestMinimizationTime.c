@@ -1,4 +1,6 @@
 // With --minimize-tests=false, a test has the values of a model
+// The default limit is 2s
+// RUN: %klee --help | grep -A1 "to not minimize" | grep "default=2s"
 // RUN: %clang %s -emit-llvm %O0opt -c -o %t.bc
 // RUN: rm -rf %t.klee-out-0
 // RUN: %klee --output-dir=%t.klee-out-0 --minimize-tests=false %t.bc 2> %t0.err

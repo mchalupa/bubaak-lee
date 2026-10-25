@@ -185,12 +185,12 @@ cl::opt<bool> MinimizeTests(
 
 cl::opt<std::string> MaxTestMinimizationTime(
     "max-test-minimization-time",
-    cl::init("1s"),
+    cl::init("2s"),
     cl::desc("With -minimize-tests, spend at most this time minimizing the "
              "nondeterministic values of a test case, then use the values "
              "found so far (or those of a model of the path constraints). "
              "Set to 0s to minimize without a limit; use -minimize-tests=false "
-             "to not minimize (default=1s)"),
+             "to not minimize (default=2s)"),
     cl::cat(TestGenCat));
 
 cl::opt<bool> DumpStatesUnlessExitOnError(
