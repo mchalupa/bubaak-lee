@@ -205,6 +205,14 @@ cl::opt<std::string> MaxDumpMinimizationTime(
              "the budget. Set to 0s for no limit (default=0s)"),
     cl::cat(TestGenCat));
 
+// (for testing the fallbacks, a query that is hard enough cannot be written
+// reliably)
+cl::opt<unsigned> DebugFailTestModel(
+    "debug-fail-test-model", cl::init(0), cl::Hidden,
+    cl::desc("1: the query for the model of a test fails, 2: also the queries "
+             "of the prefixes of the constraints (default=0)"),
+    cl::cat(TestGenCat));
+
 cl::opt<bool> DumpStatesUnlessExitOnError(
     "dump-states-unless-exit-on-error",
     cl::init(false),
@@ -4229,6 +4237,8 @@ void Executor::terminateState(ExecutionState &state,
 
   if (solverFailedState == &state)
     solverFailedState = nullptr;
+  if (lastTestState == &state)
+    lastTestState = nullptr;
 
   interpreterHandler->incPathsExplored();
   executionTree->setTerminationType(state, reason);
@@ -6398,8 +6408,8 @@ std::shared_ptr<const Assignment>
 Executor::getFallbackModel(const ExecutionState &state, bool quick) {
   static char key;
   klee_warning_once(&key, "unable to compute a model of the path constraints "
-                          "of a state, using the values of a seed, of a "
-                          "prefix of the constraints, or zeros");
+                          "of a state, using the values of a seed or of a "
+                          "prefix of the constraints");
 
   // 1. a seed of the state: its values satisfy the path constraints
   auto seeds = seedMap.find(const_cast<ExecutionState *>(&state));
@@ -6412,7 +6422,7 @@ Executor::getFallbackModel(const ExecutionState &state, bool quick) {
 
   // 2. a model of the longest prefix of the constraints that the solver
   // handles in time (the values satisfy only a part of the path constraints)
-  std::shared_ptr<const Assignment> best = std::make_shared<Assignment>();
+  std::shared_ptr<const Assignment> best; // (no model: nullptr)
   if (!quick) {
     const std::vector<ref<Expr>> all(state.constraints.begin(),
                                      state.constraints.end());
@@ -6429,7 +6439,8 @@ Executor::getFallbackModel(const ExecutionState &state, bool quick) {
           ConstraintSet::constraints_ty(all.begin(), all.begin() + mid));
       std::shared_ptr<const Assignment> model;
       solver->setTimeout(deadline - now);
-      bool success = solver->getInitialValues(prefix, model, state.queryMetaData);
+      bool success = DebugFailTestModel < 2 &&
+                     solver->getInitialValues(prefix, model, state.queryMetaData);
       solver->setTimeout(coreSolverTimeout);
       if (success && model) {
         best = model;
@@ -6440,7 +6451,8 @@ Executor::getFallbackModel(const ExecutionState &state, bool quick) {
     }
   }
 
-  // 3. (best is an empty model if there is nothing better: all zeros)
+  // 3. nothing else: no model (a test with invented values, e.g., zeros, is
+  // not a test of the state)
   return best;
 }
 
@@ -6531,9 +6543,11 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
     if (budgetUsedUp && (!modelTimeout || modelTimeout > time::seconds(1)))
       modelTimeout = time::seconds(1);
     solver->setTimeout(modelTimeout);
-    bool success = solver->getInitialValues(extendedConstraints, assignment,
+    bool success = !DebugFailTestModel &&
+                   solver->getInitialValues(extendedConstraints, assignment,
                                             state.queryMetaData);
-    if (!success && extendedConstraints.size() != state.constraints.size())
+    if (!success && !DebugFailTestModel &&
+        extendedConstraints.size() != state.constraints.size())
       // (without the additions for the readable values and small sizes)
       success = solver->getInitialValues(state.constraints, assignment,
                                          state.queryMetaData);
@@ -6541,6 +6555,21 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
     if (!success || !assignment) {
       assignment = getFallbackModel(state, budgetUsedUp);
       fallback = true;
+      if (!assignment) {
+        // No values of the test are known, do not invent them
+        static unsigned lost = 0;
+        ++lost;
+        if (lost <= 10)
+          klee_warning("unable to compute the values of the test of state %u "
+                       "(the query for a model of the path constraints failed "
+                       "or timed out; no seed, no prefix of the constraints "
+                       "with a model), no test written%s",
+                       state.getID(),
+                       lost == 10 ? " (not printing this warning anymore)"
+                                  : "");
+        lastTestState = nullptr;
+        return false;
+      }
     }
   }
 
@@ -6635,6 +6664,9 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
 
     res.push_back(std::make_pair(descr, data));
   }
+  // (the same values for the other files of the test)
+  lastTestState = &state;
+  lastTestNondets = nondets;
   return true;
 }
 
@@ -6786,26 +6818,36 @@ bool Executor::getMinimalValue(const ConstraintSet &constraints, ref<Expr> e,
   return true;
 }
 
-// get a sequence of inputs that drive the program to this state
+// get a sequence of inputs that drive the program to this state: the values
+// of the last test written for the state (those of the .ktest); otherwise from
+// the solver, if it fails from a seed or a prefix of the constraints. Empty
+// (while the state has nondet values) if there are no values: they are not
+// invented.
 std::vector<NamedConcreteValue>
 Executor::getTestVector(const ExecutionState &state) {
-  // If a query fails or times out, the values of all the inputs come from
-  // the fallback model (to be consistent), the test is never lost.
   std::shared_ptr<const Assignment> fallback;
+  const bool cached = lastTestState == &state &&
+                      lastTestNondets.size() == state.nondetValues.size();
   for (;;) {
     std::vector<NamedConcreteValue> res;
     res.reserve(state.nondetValues.size());
     bool failed = false;
 
+    size_t idx = 0;
     for (auto& it : state.nondetValues) {
       ref<ConstantExpr> value, segment;
-      if (fallback) {
+      if (cached) {
+        value = lastTestNondets[idx].first;
+        segment = lastTestNondets[idx].second;
+      } else if (fallback) {
         auto v = fallback->evaluate(it.value.getValue());
         auto sg = fallback->evaluate(it.value.getSegment());
-        value = isa<ConstantExpr>(v) ? cast<ConstantExpr>(v)
-                                     : ConstantExpr::alloc(0, v->getWidth());
-        segment = isa<ConstantExpr>(sg) ? cast<ConstantExpr>(sg)
-                                        : ConstantExpr::alloc(0, sg->getWidth());
+        if (!isa<ConstantExpr>(v) || !isa<ConstantExpr>(sg)) {
+          failed = true;
+          break;
+        }
+        value = cast<ConstantExpr>(v);
+        segment = cast<ConstantExpr>(sg);
       } else {
         solver->setTimeout(coreSolverTimeout);
         bool success = solver->getValue(state.constraints, it.value.getValue(),
@@ -6819,6 +6861,7 @@ Executor::getTestVector(const ExecutionState &state) {
           break;
         }
       }
+      ++idx;
 
       auto size = it.value.getValue()->getWidth();
       assert(size <= 64 && "Does not support bitwidth > 64");
@@ -6844,7 +6887,11 @@ Executor::getTestVector(const ExecutionState &state) {
     }
     if (!failed)
       return res;
+    if (cached || fallback)
+      return {};
     fallback = getFallbackModel(state, false);
+    if (!fallback)
+      return {};
   }
 }
 

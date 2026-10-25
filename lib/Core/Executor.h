@@ -211,6 +211,12 @@ private:
   /// it would terminate or fork otherwise) and the value it got is not used
   /// for any verdict.
   ExecutionState *solverFailedState = nullptr;
+
+  /// The nondet values (value, segment) of the last test written by
+  /// getSymbolicSolution, for the state \p lastTestState (getTestVector gives
+  /// the same values as the .ktest file)
+  const ExecutionState *lastTestState = nullptr;
+  std::vector<std::pair<ref<ConstantExpr>, ref<ConstantExpr>>> lastTestNondets;
   std::string solverFailedMessage;
 
   /// Maximum time to allow for a single instruction.
@@ -585,9 +591,10 @@ private:
   bool terminateOnSolverFailure(ExecutionState *state);
 
   /// A model of the constraints of \p state to get the values of its test
-  /// when the query for the model fails: a seed of the state, the model of
-  /// the longest prefix of the constraints found in time (unless \p
-  /// quick), or zeros. Never fails.
+  /// when the query for the model fails or times out: a seed of the state,
+  /// or the model of the longest non-empty prefix of the constraints found
+  /// in time (unless \p quick). nullptr if there is none: no test is written
+  /// (the values must not be invented).
   std::shared_ptr<const Assignment> getFallbackModel(const ExecutionState &state,
                                                      bool quick);
 

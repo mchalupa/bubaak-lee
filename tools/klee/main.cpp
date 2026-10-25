@@ -418,7 +418,8 @@ public:
       const std::vector<std::pair<std::string, std::vector<unsigned char>>>
           &out,
       unsigned id);
-  void writeWitnessYAML(const ExecutionState &state, unsigned id);
+  void writeWitnessYAML(const ExecutionState &state, unsigned id,
+                        const std::vector<NamedConcreteValue> &testvec);
   void writeTestCaseXML(
       bool isError,
       const std::vector<std::pair<std::string, std::vector<unsigned char>>>
@@ -885,7 +886,9 @@ bool isFloatNondet(const std::string &name) {
 
 /// Write a violation witness in the SV-COMP format 2.0: the sequence of
 /// return values of __VERIFIER_nondet_* calls followed by the target.
-void KleeHandler::writeWitnessYAML(const ExecutionState &state, unsigned id) {
+void KleeHandler::writeWitnessYAML(
+    const ExecutionState &state, unsigned id,
+    const std::vector<NamedConcreteValue> &testvec) {
   // non-termination is witnessed by a cycle, which is supported only by the
   // GraphML witnesses
   if (state.lastLoopHead || state.lastLoopFail)
@@ -918,7 +921,6 @@ void KleeHandler::writeWitnessYAML(const ExecutionState &state, unsigned id) {
          "      version: " << yamlQuote(version) << "\n"
          "  content:\n";
 
-  auto testvec = m_interpreter->getTestVector(state);
   assert(testvec.size() == state.nondetValues.size());
   for (size_t i = 0; i < testvec.size(); ++i) {
     const auto &input = testvec[i];
@@ -977,7 +979,26 @@ void KleeHandler::processTestCase(const ExecutionState &state,
     bool success = m_interpreter->getSymbolicSolution(state, assignments);
 
     if (!success)
-      klee_warning("unable to get symbolic solution, losing test case");
+      klee_warning("unable to get the values of the test case (see the "
+                   "warning above), no test case written");
+
+    // the values of the inputs for the XML test, the witnesses, and the
+    // harness: those of the .ktest, or none (no file is written then)
+    std::vector<NamedConcreteValue> testvec;
+    bool testvecChecked = false, testvecOk = false;
+    auto getVec = [&]() {
+      if (!testvecChecked) {
+        testvecChecked = true;
+        if (success) {
+          testvec = m_interpreter->getTestVector(state);
+          testvecOk = testvec.size() == state.nondetValues.size();
+        }
+        if (!testvecOk)
+          klee_warning("unable to get the input values of the test case, not "
+                       "writing its test-case, witness, and harness files");
+      }
+      return testvecOk;
+    };
 
     const auto start_time = time::getWallTime();
     bool atLeastOneGenerated = false;
@@ -1001,7 +1022,7 @@ void KleeHandler::processTestCase(const ExecutionState &state,
         *f << errorMessage;
     }
 
-    if (WriteTestCases) {
+    if (WriteTestCases && getVec()) {
       if (auto f = openTestFile(TestCasesSuffix.empty() ?
                                 "xml" : TestCasesSuffix+".xml", test_id)) {
         // write the header
@@ -1017,7 +1038,6 @@ void KleeHandler::processTestCase(const ExecutionState &state,
           *f << "<testcase>\n";
         }
 
-        auto testvec = m_interpreter->getTestVector(state);
         for (auto& input : testvec) {
           if (input.getName().compare(0, 17 , "__VERIFIER_nondet") != 0)
               continue;
@@ -1030,7 +1050,7 @@ void KleeHandler::processTestCase(const ExecutionState &state,
       }
     }
 
-    if (WriteWitness) {
+    if (WriteWitness && getVec()) {
       if (auto witness = openTestFile("graphml", test_id)) {
 
         *witness << "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n" ;
@@ -1043,8 +1063,6 @@ void KleeHandler::processTestCase(const ExecutionState &state,
             "<node id=\"0\">\n"
             "  <data key=\"entry\">true</data>\n"
             "</node>\n";
-
-        auto testvec = m_interpreter->getTestVector(state);
 
         int node = 0;
         int cyclehead = 0; // id of cyclehead
@@ -1158,11 +1176,11 @@ void KleeHandler::processTestCase(const ExecutionState &state,
       }
     }
 
-    if (WriteWitnessYAML && errorMessage) {
-      writeWitnessYAML(state, test_id);
+    if (WriteWitnessYAML && errorMessage && getVec()) {
+      writeWitnessYAML(state, test_id, testvec);
     }
 
-    if (WriteHarness) {
+    if (WriteHarness && getVec()) {
       if (auto harness = openTestFile("harness.c", test_id)) {
 
         *harness << "#include <assert.h>\n" ;
@@ -1171,7 +1189,6 @@ void KleeHandler::processTestCase(const ExecutionState &state,
         *harness << "void __VERIFIER_error(void) { assert(0 && \"__VERIFIER_error called\"); }\n" ;
         *harness << "void __VERIFIER_assume(int c) { assert(c && \"__VERIFIER_assume(0) called\"); }\n\n" ;
 
-        auto testvec = m_interpreter->getTestVector(state);
         // group the values according to functions
         std::map<std::string, std::vector<ConcreteValue>> functions;
 
@@ -1292,7 +1309,7 @@ void KleeHandler::processTestCase(const ExecutionState &state,
       }
     }
 
-    if (m_numGeneratedTests == MaxTests)
+    if (MaxTests && m_numGeneratedTests == MaxTests)
       m_interpreter->setHaltExecution(true);
 
     if (WriteTestInfo) {
