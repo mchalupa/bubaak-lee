@@ -930,6 +930,9 @@ void KleeHandler::writeWitnessYAML(
     // we cannot express these in the constraint (or not reliably)
     if (input.isPointer() || isFloatNondet(name))
       continue;
+    // (the bytes of a memory are not a return value)
+    if (name == "__VERIFIER_nondet_memory")
+      continue;
     auto *ki = state.nondetValues[i].kinstruction;
     if (!ki)
       continue;

@@ -146,6 +146,7 @@ static constexpr std::array handlerInfo = {
   add("__VERIFIER_nondet_double", handleVerifierNondetDouble, true),
   add("__VERIFIER_nondet_loff_t", handleVerifierNondetLOffT, true),
   add("__VERIFIER_nondet_long", handleVerifierNondetLong, true),
+  add("__VERIFIER_nondet_memory", handleVerifierNondetMemory, true),
   add("__VERIFIER_nondet_pchar", handleVerifierNondetPChar, true),
   add("__VERIFIER_nondet_pointer", handleVerifierNondetPointer, true),
   add("__VERIFIER_nondet_pthread_t", handleVerifierNondetPthreadT, true),
@@ -1039,8 +1040,6 @@ void SpecialFunctionHandler::putConcreteValue(ExecutionState& state,
                                               KInstruction *target,
                                               ref<Expr> expr) {
   assert(isa<ConstantExpr>(expr) && "Assumed constant expression");
-  // bind the new concrete value
-  executor.bindLocal(target, state, expr);
   // store it in the vector of nondets, so that we have them in the test output
   auto& nnv = state.addNondetValue(KValue(expr), isSigned, name);
   nnv.kinstruction = target;
@@ -1059,13 +1058,23 @@ void SpecialFunctionHandler::handleVerifierNondetType(ExecutionState &state,
   if (retTy->isSized())
     size = executor.kmodule->targetData->getTypeSizeInBits(retTy);
 
+  executor.bindLocal(target, state,
+                     getNondetValue(state, target, size, isSigned, name,
+                                    isPointer));
+}
+
+// A new nondet value of `size` bits (a fresh symbolic value, or the value of
+// the replayed input), registered as an input of the test.
+KValue SpecialFunctionHandler::getNondetValue(ExecutionState &state,
+                                              KInstruction *target,
+                                              unsigned size, bool isSigned,
+                                              const std::string &name,
+                                              bool isPointer) {
+
   // create nondet value if we are not replaying
   if (executor.replayNondet.empty()) {
-    executor.bindLocal(target, state,
-                       executor.createNondetValue(state, size,
-                                                  isSigned, target,
-                                                  name, isPointer));
-    return;
+    return executor.createNondetValue(state, size, isSigned, target, name,
+                                      isPointer);
   }
 
   // we're replaying, get the nondet value that we should use
@@ -1073,11 +1082,8 @@ void SpecialFunctionHandler::handleVerifierNondetType(ExecutionState &state,
   if (info->file.empty()) {
     klee_warning("Replaying nondet without debugging information, "
                  "using nondet value instead of concrete");
-    executor.bindLocal(target, state,
-                       executor.createNondetValue(state, size,
-                                                  isSigned, target,
-                                                  name, isPointer));
-    return;
+    return executor.createNondetValue(state, size, isSigned, target, name,
+                                      isPointer);
   }
 
   // position in the nondet vector we're in
@@ -1090,9 +1096,9 @@ void SpecialFunctionHandler::handleVerifierNondetType(ExecutionState &state,
    //                                              isSigned, target, name));
 
     klee_warning("Got out of nondet values while replaying, using 0");
-    putConcreteValue(state, name, isSigned,
-                     target, ConstantExpr::alloc(0, size));
-    return;
+    auto zero = ConstantExpr::alloc(0, size);
+    putConcreteValue(state, name, isSigned, target, zero);
+    return zero;
   }
 
   auto& nondet = executor.replayNondet[position];
@@ -1107,10 +1113,10 @@ void SpecialFunctionHandler::handleVerifierNondetType(ExecutionState &state,
      //             std::get<0>(nondet).c_str(), std::get<1>(nondet),
      //             std::get<2>(nondet), val.getZExtValue());
 
-      putConcreteValue(state, name, val.isSigned(), target,
-                       ConstantExpr::alloc(val.getZExtValue(), size));
-
-    ++position; // matched, move on
+      auto value = ConstantExpr::alloc(val.getZExtValue(), size);
+      putConcreteValue(state, name, val.isSigned(), target, value);
+      ++position; // matched, move on
+      return value;
   } else {
     klee_warning("Did not match nondet value for: %s:%u:%u, using 0",
    //              "using nondet value",
@@ -1120,9 +1126,91 @@ void SpecialFunctionHandler::handleVerifierNondetType(ExecutionState &state,
    //executor.bindLocal(target, state,
    //                   executor.createNondetValue(state, size,
    //                                              isSigned, target, name));
-    putConcreteValue(state, name, isSigned,
-                     target, ConstantExpr::alloc(0, size));
+    auto zero = ConstantExpr::alloc(0, size);
+    putConcreteValue(state, name, isSigned, target, zero);
+    return zero;
   }
+}
+
+// void __VERIFIER_nondet_memory(void *ptr, size_t size): the bytes
+// [ptr, ptr + size) get new nondet values, the rest of the object is kept. The
+// values are inputs named __VERIFIER_nondet_memory, one for each chunk of at
+// most 8 bytes (the inputs of a test are scalars), in the order of the memory.
+void SpecialFunctionHandler::handleVerifierNondetMemory(
+    ExecutionState &state, KInstruction *target,
+    const std::vector<Cell> &arguments) {
+  if (arguments.size() != 2) {
+    executor.terminateStateOnUserError(
+        state, "Incorrect number of arguments to "
+               "__VERIFIER_nondet_memory(void*, size_t)");
+    return;
+  }
+
+  // a symbolic size is concretized (like the sizes of other calls)
+  ref<Expr> sizeExpr = ZExtExpr::create(arguments[1].value,
+                                        Context::get().getPointerWidth());
+  sizeExpr = executor.toConstant(state, sizeExpr,
+                                 "__VERIFIER_nondet_memory size");
+  uint64_t size = cast<ConstantExpr>(sizeExpr)->getZExtValue();
+  if (size == 0)
+    return;
+
+  // the pointer is concretized too (an invalid one is a memory error)
+  KValue address(
+      executor.toConstant(state, arguments[0].getSegment(),
+                          "__VERIFIER_nondet_memory pointer segment"),
+      executor.toConstant(state, arguments[0].getOffset(),
+                          "__VERIFIER_nondet_memory pointer"));
+
+  ObjectPair op;
+  if (!state.addressSpace.resolveOneConstantSegment(address, op)) {
+    executor.terminateStateOnProgramError(
+        state, "memory error: out of bound pointer", StateTerminationType::Ptr,
+        executor.getKValueInfo(state, address));
+    return;
+  }
+  const MemoryObject *mo = op.first;
+  const ObjectState *os = op.second;
+
+  // the whole region must be in the object (its first and last byte)
+  ref<Expr> offset = mo->getOffsetExpr(address.getOffset());
+  ref<Expr> inBounds = AndExpr::create(
+      mo->getBoundsCheckPointer(address),
+      mo->getBoundsCheckPointer(
+          KValue(address.getSegment(),
+                 AddExpr::create(address.getOffset(),
+                                 ConstantExpr::alloc(
+                                     size - 1,
+                                     address.getOffset()->getWidth())))));
+  if (!inBounds->isTrue()) {
+    executor.terminateStateOnProgramError(
+        state, "memory error: out of bound pointer", StateTerminationType::Ptr,
+        executor.getKValueInfo(state, address));
+    return;
+  }
+  if (os->readOnly) {
+    executor.terminateStateOnProgramError(
+        state, "memory error: object read only", StateTerminationType::ReadOnly,
+        executor.getKValueInfo(state, address));
+    return;
+  }
+
+  const unsigned start = cast<ConstantExpr>(offset)->getZExtValue();
+  std::vector<std::pair<unsigned, KValue>> chunks;
+  for (uint64_t done = 0; done < size;) {
+    unsigned bytes = 8;
+    while (bytes > size - done)
+      bytes /= 2;
+    chunks.emplace_back(
+        start + done,
+        getNondetValue(state, target, bytes * 8, /* isSigned = */ false,
+                       "__VERIFIER_nondet_memory", /* isPointer = */ false));
+    done += bytes;
+  }
+
+  ObjectState *wos = state.addressSpace.getWriteable(mo, os);
+  for (auto &chunk : chunks)
+    wos->write(chunk.first, chunk.second);
 }
 
 void SpecialFunctionHandler::handleVerifierNondetInt(ExecutionState &state,

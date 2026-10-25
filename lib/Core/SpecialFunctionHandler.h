@@ -80,6 +80,10 @@ namespace klee {
                                   const std::string& name,
                                   bool isPointer = false);
 
+    KValue getNondetValue(ExecutionState &state, KInstruction *target,
+                          unsigned size, bool isSigned,
+                          const std::string &name, bool isPointer);
+
     void putConcreteValue(ExecutionState& state,
                           const std::string& name, bool isSigned,
                           KInstruction *target,
@@ -136,6 +140,7 @@ namespace klee {
     HANDLER(handleScopeEnter);
     HANDLER(handleScopeLeave);
     HANDLER(handleVerifierNondetInt);
+    HANDLER(handleVerifierNondetMemory);
     HANDLER(handleVerifierNondetUInt);
     HANDLER(handleVerifierNondetBool);
     HANDLER(handleVerifierNondet_Bool);
