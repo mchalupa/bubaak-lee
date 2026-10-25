@@ -174,19 +174,23 @@ cl::opt<unsigned> MaxDumpedStates(
 
 cl::opt<bool> MinimizeTests(
     "minimize-tests",
-    cl::init(false),
-    cl::desc("Minimize the nondeterministic values of a test case (each value "
-             "takes several solver queries, which can be slow with hard "
-             "constraints). Without it, a test has the values of a single "
-             "model of the path constraints (default=false)"),
+    cl::init(true),
+    cl::desc("Make the nondeterministic values of a test case small: first "
+             "with one query for all of them (below 2^8, or 2^16), then "
+             "minimize each one while there is time (see "
+             "-max-test-minimization-time). Without it, a test has the values "
+             "of a single model of the path constraints, which can be huge "
+             "(default=true)"),
     cl::cat(TestGenCat));
 
 cl::opt<std::string> MaxTestMinimizationTime(
     "max-test-minimization-time",
+    cl::init("1s"),
     cl::desc("With -minimize-tests, spend at most this time minimizing the "
-             "nondeterministic values of a test case, then use the values of "
-             "a model of the path constraints. Set to 0s to minimize without "
-             "a limit (default=0s)"),
+             "nondeterministic values of a test case, then use the values "
+             "found so far (or those of a model of the path constraints). "
+             "Set to 0s to minimize without a limit; use -minimize-tests=false "
+             "to not minimize (default=1s)"),
     cl::cat(TestGenCat));
 
 cl::opt<bool> DumpStatesUnlessExitOnError(
@@ -6360,11 +6364,10 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
   // We cannot use getTestVector(), as the values in .ktest
   // have different endiandness (byte 0 goes first, then byte 1, etc.)
   std::vector<std::pair<ref<ConstantExpr>, ref<ConstantExpr>>> nondets;
-  if (!state.nondetValues.empty() &&
-      (!MinimizeTests || maxTestMinimizationTime)) {
-    // the minimization takes several queries for each value, which can be
-    // too slow with hard constraints. Use the values of a model if it is off
-    // or does not finish in time.
+  if (!state.nondetValues.empty()) {
+    // Get the values of a model, then make them smaller as long as there is
+    // time (the time is limited because the queries can be slow with hard
+    // constraints, and the model is a valid test).
     if (!assignment) {
       solver->setTimeout(coreSolverTimeout);
       bool success = solver->getInitialValues(extendedConstraints, assignment,
@@ -6375,43 +6378,20 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
         return false;
       }
     }
-    auto deadline = time::getWallTime() + maxTestMinimizationTime;
-    for (auto &it : state.nondetValues) {
-      if (!MinimizeTests)
-        break;
-      ref<ConstantExpr> value, segment;
-      if (!getMinimalValue(extendedConstraints, it.value.getValue(), deadline,
-                           state.queryMetaData, value))
-        break;
-      cm.addConstraint(EqExpr::create(it.value.getValue(), value));
-      if (!getMinimalValue(extendedConstraints, it.value.getSegment(),
-                           deadline, state.queryMetaData, segment))
-        break;
-      cm.addConstraint(EqExpr::create(it.value.getSegment(), segment));
-      nondets.emplace_back(value, segment);
-    }
-    if (nondets.size() < state.nondetValues.size()) {
-      if (MinimizeTests)
+    for (auto &it : state.nondetValues)
+      nondets.emplace_back(
+          cast<ConstantExpr>(assignment->evaluate(it.value.getValue())),
+          cast<ConstantExpr>(assignment->evaluate(it.value.getSegment())));
+
+    if (MinimizeTests) {
+      // (the unlimited minimization has a deadline too far to be reached)
+      auto deadline = time::getWallTime() +
+                      (maxTestMinimizationTime ? maxTestMinimizationTime
+                                               : time::seconds(3600 * 24 * 365));
+      if (!minimizeNondetValues(state, extendedConstraints, cm, deadline,
+                                nondets))
         klee_warning_once(nullptr, "minimizing the values of a test case took "
                                    "too long, using the values of a model");
-      nondets.clear();
-      for (auto &it : state.nondetValues)
-        nondets.emplace_back(
-            cast<ConstantExpr>(assignment->evaluate(it.value.getValue())),
-            cast<ConstantExpr>(assignment->evaluate(it.value.getSegment())));
-    }
-  } else {
-    for (auto &it : state.nondetValues) {
-      auto pair = solver->getRange(
-          extendedConstraints, it.value.getValue(), state.queryMetaData);
-      auto value = pair.first;
-      cm.addConstraint(EqExpr::create(it.value.getValue(), value));
-
-      pair = solver->getRange(
-          extendedConstraints, it.value.getSegment(), state.queryMetaData);
-      auto segment = pair.first;
-      cm.addConstraint(EqExpr::create(it.value.getSegment(), segment));
-      nondets.emplace_back(value, segment);
     }
   }
 
@@ -6452,6 +6432,90 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
     res.push_back(std::make_pair(descr, data));
   }
   return true;
+}
+
+bool Executor::minimizeNondetValues(
+    const ExecutionState &state, const ConstraintSet &constraints,
+    ConstraintManager &cm, time::Point deadline,
+    std::vector<std::pair<ref<ConstantExpr>, ref<ConstantExpr>>> &nondets) {
+  // 1. one query for all the values together: all of them in a small range
+  // (the signed values as -2^(k-1) <= x < 2^(k-1), the others as x < 2^k).
+  // The ranges are tried from the smallest one and the first satisfiable one
+  // is used.
+  bool refined = false;
+  for (unsigned k : {8u, 16u}) {
+    ref<Expr> small = ConstantExpr::alloc(1, Expr::Bool);
+    bool any = false;
+    for (auto &it : state.nondetValues) {
+      ref<Expr> v = it.value.getValue();
+      Expr::Width w = v->getWidth();
+      // a pointer has the segment, do not restrict its offset
+      auto *seg = dyn_cast<ConstantExpr>(it.value.getSegment());
+      if (w <= k || isa<ConstantExpr>(v) || !seg || !seg->isZero())
+        continue;
+      ref<Expr> inRange;
+      if (it.isSigned)
+        inRange = UltExpr::create(
+            AddExpr::create(v, ConstantExpr::create(1ULL << (k - 1), w)),
+            ConstantExpr::create(1ULL << k, w));
+      else
+        inRange = UltExpr::create(v, ConstantExpr::create(1ULL << k, w));
+      small = AndExpr::create(small, inRange);
+      any = true;
+    }
+    if (!any)
+      break;
+    auto now = time::getWallTime();
+    if (now + time::milliseconds(1) >= deadline)
+      return false;
+    ConstraintSet withSmall(constraints);
+    ConstraintManager(withSmall).addConstraint(small);
+    std::shared_ptr<const Assignment> model;
+    solver->setTimeout(deadline - now);
+    bool success = solver->getInitialValues(withSmall, model, state.queryMetaData);
+    solver->setTimeout(time::Span());
+    if (!success) {
+      // either UNSAT (try a larger range) or the timeout (no time left)
+      if (time::getWallTime() + time::milliseconds(1) >= deadline)
+        return false;
+      continue;
+    }
+    cm.addConstraint(small);
+    for (size_t i = 0; i < nondets.size(); ++i)
+      nondets[i].first = cast<ConstantExpr>(
+          model->evaluate(state.nondetValues[i].value.getValue()));
+    break;
+  }
+
+  // 2. while there is time, make the values minimal one by one
+  // (as the model values may not be minimal in the range)
+  std::vector<ref<ConstantExpr>> minimal;
+  for (auto &it : state.nondetValues) {
+    ref<ConstantExpr> value;
+    if (!getMinimalValue(constraints, it.value.getValue(), deadline,
+                         state.queryMetaData, value))
+      break;
+    cm.addConstraint(EqExpr::create(it.value.getValue(), value));
+    minimal.push_back(value);
+    refined = true;
+  }
+  if (!refined)
+    return minimal.size() == state.nondetValues.size();
+
+  // the refined values and the others from one model of all the constraints
+  std::shared_ptr<const Assignment> model;
+  solver->setTimeout(coreSolverTimeout);
+  bool success = solver->getInitialValues(constraints, model, state.queryMetaData);
+  solver->setTimeout(time::Span());
+  if (!success)
+    return false;
+  for (size_t i = 0; i < nondets.size(); ++i) {
+    nondets[i].first = cast<ConstantExpr>(
+        model->evaluate(state.nondetValues[i].value.getValue()));
+    nondets[i].second = cast<ConstantExpr>(
+        model->evaluate(state.nondetValues[i].value.getSegment()));
+  }
+  return minimal.size() == state.nondetValues.size();
 }
 
 bool Executor::getMinimalValue(const ConstraintSet &constraints, ref<Expr> e,

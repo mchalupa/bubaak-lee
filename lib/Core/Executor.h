@@ -684,6 +684,15 @@ public:
 
   /// The minimal (unsigned) value of `e` under `constraints`, false if it is
   /// not found before `deadline`.
+  /// Make the values in \p nondets (a model) smaller, within \p deadline;
+  /// the constraints of the values found are added to \p cm (which changes
+  /// \p constraints). False if the deadline passed before all values were
+  /// minimal (\p nondets is always valid).
+  bool minimizeNondetValues(
+      const ExecutionState &state, const ConstraintSet &constraints,
+      ConstraintManager &cm, time::Point deadline,
+      std::vector<std::pair<ref<ConstantExpr>, ref<ConstantExpr>>> &nondets);
+
   bool getMinimalValue(const ConstraintSet &constraints, ref<Expr> e,
                        time::Point deadline, SolverQueryMetaData &metaData,
                        ref<ConstantExpr> &result);
