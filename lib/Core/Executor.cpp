@@ -1215,8 +1215,11 @@ ref<Expr> Executor::maxStaticPctChecks(ExecutionState &current,
     ref<klee::ConstantExpr> value;
     bool success = solver->getValue(current.constraints, condition, value,
                                     current.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
-    (void)success;
+    if (!success) {
+      // (fork terminates the state)
+      noteSolverFailure(current, "Solver failure (fork limit).");
+      return condition;
+    }
 
     std::string msg("skipping fork and concretizing condition (MaxStatic*Pct "
                     "limit reached) at ");
@@ -1232,6 +1235,10 @@ ref<Expr> Executor::maxStaticPctChecks(ExecutionState &current,
 
 Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
                                    bool isInternal, BranchType reason) {
+  // (a value got after a failed query is not used for a branch)
+  if (terminateOnSolverFailure(&current))
+    return StatePair(nullptr, nullptr);
+
   Solver::Validity res;
   std::map< ExecutionState*, std::vector<SeedInfo> >::iterator it =
     seedMap.find(&current);
@@ -1239,6 +1246,8 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
 
   if (!isSeeding)
     condition = maxStaticPctChecks(current, condition);
+  if (terminateOnSolverFailure(&current))
+    return StatePair(nullptr, nullptr);
 
   time::Span timeout = coreSolverTimeout;
   if (isSeeding)
@@ -1545,9 +1554,18 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
   /* If no seed evaluation results in a constant, call the solver */
   ref<ConstantExpr> cvalue = getValueFromSeeds(state, e);
   if (!cvalue) {
-    [[maybe_unused]] bool success =
+    solver->setTimeout(coreSolverTimeout);
+    bool success =
         solver->getValue(state.constraints, e, cvalue, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
+    solver->setTimeout(time::Span());
+    if (!success) {
+      // The state cannot go on with a value (the solver timed out or failed).
+      // Return a dummy zero and terminate the state as killed by the solver
+      // as soon as possible (the dummy must not lead to a verdict).
+      noteSolverFailure(state, "Query timed out (concretization: " + reason +
+                                   ").");
+      return ConstantExpr::alloc(0, e->getWidth());
+    }
   }
 
   std::string str;
@@ -1615,11 +1633,13 @@ void Executor::executeGetValue(ExecutionState &state,
       (isa<ConstantExpr>(expr) && isa<ConstantExpr>(segment))) {
     ref<ConstantExpr> off, seg;
     expr = optimizer.optimizeExpr(expr, true);
-    bool success = solver->getValue(state.constraints, expr, off, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
-    success = solver->getValue(state.constraints, segment, seg, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
-    (void) success;
+    bool success = solver->getValue(state.constraints, expr, off, state.queryMetaData) &&
+                   solver->getValue(state.constraints, segment, seg, state.queryMetaData);
+    if (!success) {
+      state.pc = state.prevPC;
+      terminateStateOnSolverError(state, "Solver failure (get value).");
+      return;
+    }
     bindLocal(target, state, KValue(seg, off));
   } else {
     // This does not work with segments yet
@@ -2650,9 +2670,13 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
 
       // check feasibility
       bool result;
-      bool success __attribute__((unused)) =
+      bool success =
           solver->mayBeTrue(state.constraints, e, result, state.queryMetaData);
-      assert(success && "FIXME: Unhandled solver failure");
+      if (!success) {
+        state.pc = state.prevPC;
+        terminateStateOnSolverError(state, "Solver failure (indirectbr).");
+        return;
+      }
       if (result) {
         targets.push_back(d);
         expressions.push_back(e);
@@ -2660,9 +2684,13 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     }
     // check errorCase feasibility
     bool result;
-    bool success __attribute__((unused)) = solver->mayBeTrue(
-        state.constraints, errorCase, result, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
+    bool success = solver->mayBeTrue(state.constraints, errorCase, result,
+                                     state.queryMetaData);
+    if (!success) {
+      state.pc = state.prevPC;
+      terminateStateOnSolverError(state, "Solver failure (indirectbr).");
+      return;
+    }
     if (result) {
       expressions.push_back(errorCase);
     }
@@ -2741,8 +2769,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         match = optimizer.optimizeExpr(match, false);
         bool success = solver->mayBeTrue(state.constraints, match, result,
                                          state.queryMetaData);
-        assert(success && "FIXME: Unhandled solver failure");
-        (void) success;
+        if (!success) {
+          state.pc = state.prevPC;
+          terminateStateOnSolverError(state, "Solver failure (switch).");
+          return;
+        }
         if (result) {
           BasicBlock *caseSuccessor = it->second;
 
@@ -2770,8 +2801,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       bool res;
       bool success = solver->mayBeTrue(state.constraints, defaultValue, res,
                                        state.queryMetaData);
-      assert(success && "FIXME: Unhandled solver failure");
-      (void) success;
+      if (!success) {
+        state.pc = state.prevPC;
+        terminateStateOnSolverError(state, "Solver failure (switch).");
+        return;
+      }
       if (res) {
         std::pair<std::map<BasicBlock *, ref<Expr> >::iterator, bool> ret =
             branchTargets.insert(
@@ -2910,8 +2944,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         ref<ConstantExpr> value;
         bool success =
             solver->getValue(free->constraints, v, value, free->queryMetaData);
-        assert(success && "FIXME: Unhandled solver failure");
-        (void) success;
+        if (!success) {
+          free->pc = free->prevPC;
+          terminateStateOnSolverError(*free, "Solver failure (function pointer).");
+          break;
+        }
         StatePair res = fork(*free, EqExpr::create(v, value), true, BranchType::Call);
         if (res.first) {
           uint64_t addr = value->getZExtValue();
@@ -4041,6 +4078,7 @@ void Executor::run(ExecutionState &initialState) {
       stepInstruction(state);
 
       executeInstruction(state, ki);
+      terminateOnSolverFailure(nullptr);
       timers.invoke();
       if (::dumpStates) dumpStates();
       if (::dumpExecutionTree)
@@ -4096,6 +4134,7 @@ void Executor::run(ExecutionState &initialState) {
     stepInstruction(state);
 
     executeInstruction(state, ki);
+    terminateOnSolverFailure(nullptr);
     timers.invoke();
     if (::dumpStates) dumpStates();
     if (::dumpExecutionTree)
@@ -4128,8 +4167,8 @@ std::string Executor::getKValueInfo(ExecutionState &state,
   } else {
     bool success = solver->getValue(state.constraints, address, segmentValue,
                                     offsetValue, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
-    (void) success;
+    if (!success)
+      return "\taddress: unknown (solver failure)\n";
     info << "\texample: " << segmentValue->getZExtValue()
         << ":" << offsetValue->getZExtValue() << "\n";
     std::pair<ref<Expr>, ref<Expr>> res = solver->getRange(
@@ -4164,6 +4203,9 @@ void Executor::terminateState(ExecutionState &state,
     klee_warning_once(replayKTest,
                       "replay did not consume all objects in test input.");
   }
+
+  if (solverFailedState == &state)
+    solverFailedState = nullptr;
 
   interpreterHandler->incPathsExplored();
   executionTree->setTerminationType(state, reason);
@@ -4366,6 +4408,8 @@ void Executor::reportError(const llvm::Twine &message,
 }
 
 void Executor::terminateStateOnExit(ExecutionState &state) {
+  if (terminateOnSolverFailure(&state))
+    return;
   ++stats::terminationExit;
   if ((CheckLeaks || CheckMemCleanup) && hasMemoryLeaks(state)) {
     if (CheckMemCleanup) {
@@ -4509,6 +4553,10 @@ void Executor::terminateStateOnError(ExecutionState &state,
                                      StateTerminationType terminationType,
                                      const llvm::Twine &info,
                                      const char *suffix) {
+  // (the error may be an effect of a dummy value after a failed query)
+  if (terminateOnSolverFailure(&state))
+    return;
+
   if (!state.overApproximation.empty() &&
       terminationType > StateTerminationType::SOLVERERR &&
       terminationType <= StateTerminationType::PROGERR) {
@@ -4569,9 +4617,12 @@ void Executor::terminateStateOnError(ExecutionState &state,
   // or if we do not search for a specific error and we haven't emitted this error yet
   // (with -write-kill-tests, the test of a state killed by an execution error
   // is written as a kill test, only once)
+  // (also the state killed by the solver: it can be continued by a tool that
+  // does not hit the same query)
   const bool killTest = WriteKillTests && !haltedOnError &&
-                        terminationType > StateTerminationType::USERERR &&
-                        terminationType <= StateTerminationType::EXECERR;
+                        ((terminationType > StateTerminationType::USERERR &&
+                          terminationType <= StateTerminationType::EXECERR) ||
+                         terminationType == StateTerminationType::Solver);
   bool reported = true;
   if (EmitAllErrors || haltExecution || (ExitOnErrorType.empty() && notemitted)) {
     reportError(messaget, state, info, suffix, terminationType, killTest);
@@ -4588,8 +4639,9 @@ void Executor::terminateStateOnError(ExecutionState &state,
   // KLEE does not explore the paths that continue from a state killed by an
   // execution error (e.g., an unsupported instruction); dump its path so
   // that another tool can continue from it (as in toConstant)
-  if (pathWriter && terminationType > StateTerminationType::USERERR &&
-      terminationType <= StateTerminationType::EXECERR) {
+  if (pathWriter && ((terminationType > StateTerminationType::USERERR &&
+                      terminationType <= StateTerminationType::EXECERR) ||
+                     terminationType == StateTerminationType::Solver)) {
     const auto& pathfile = interpreterHandler->dumpPath(state);
     if (!pathfile.empty())
       klee_warning("Dumped unfinished path to file: %s (reason: %s)",
@@ -4617,6 +4669,26 @@ void Executor::terminateStateOnProgramError(ExecutionState &state,
          reason <= StateTerminationType::PROGERR);
   ++stats::terminationProgramError;
   terminateStateOnError(state, message, reason, info, suffix);
+}
+
+void Executor::noteSolverFailure(ExecutionState &state,
+                                 const std::string &message) {
+  if (solverFailedState)
+    return; // (keep the first failure)
+  solverFailedState = &state;
+  solverFailedMessage = message;
+}
+
+bool Executor::terminateOnSolverFailure(ExecutionState *state) {
+  if (!solverFailedState || (state && solverFailedState != state))
+    return false;
+  ExecutionState &failed = *solverFailedState;
+  const std::string message = std::move(solverFailedMessage);
+  solverFailedState = nullptr;
+  solverFailedMessage.clear();
+  failed.pc = failed.prevPC;
+  terminateStateOnSolverError(failed, message);
+  return true;
 }
 
 void Executor::terminateStateOnSolverError(ExecutionState &state,
@@ -5229,8 +5301,15 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
       ref<ConstantExpr> ce = getValueFromSeeds(state, value);
       bool success = true;
       if (!ce) {
+        solver->setTimeout(coreSolverTimeout);
         success = solver->getValue(state.constraints, value, ce, state.queryMetaData);
-        assert(success && "FIXME: Unhandled solver failure");
+        solver->setTimeout(time::Span());
+        if (!success) {
+          state.pc = state.prevPC;
+          terminateStateOnSolverError(
+              state, "Query timed out (external call argument).");
+          return;
+        }
       }
       ce->toMemory(&args[wordIndex]);
       ObjectPair op;
@@ -5433,6 +5512,10 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
     else
       klee_warning_once(callable->getValue(), "%s", os.str().c_str());
   }
+
+  // (a value of the memory of the call was concretized with a failed query)
+  if (terminateOnSolverFailure(&state))
+    return;
 
   bool success = externalDispatcher->executeCall(callable, target->inst, args);
   if (!success) {
@@ -6288,13 +6371,73 @@ void Executor::getConstraintLog(const ExecutionState &state, std::string &res,
   }
 }
 
+std::shared_ptr<const Assignment>
+Executor::getFallbackModel(const ExecutionState &state, bool quick) {
+  static char key;
+  klee_warning_once(&key, "unable to compute a model of the path constraints "
+                          "of a state, using the values of a seed, of a "
+                          "prefix of the constraints, or zeros");
+
+  // 1. a seed of the state: its values satisfy the path constraints
+  auto seeds = seedMap.find(const_cast<ExecutionState *>(&state));
+  if (seeds != seedMap.end() && !seeds->second.empty()) {
+    auto model = std::make_shared<Assignment>();
+    for (const auto &binding : seeds->second.front().assignment.bindings)
+      model->addBinding(binding.first, binding.second);
+    return model;
+  }
+
+  // 2. a model of the longest prefix of the constraints that the solver
+  // handles in time (the values satisfy only a part of the path constraints)
+  std::shared_ptr<const Assignment> best = std::make_shared<Assignment>();
+  if (!quick) {
+    const std::vector<ref<Expr>> all(state.constraints.begin(),
+                                     state.constraints.end());
+    auto deadline =
+        time::getWallTime() +
+        (coreSolverTimeout ? coreSolverTimeout : time::seconds(1));
+    size_t lo = 0, hi = all.size();
+    while (lo < hi) {
+      size_t mid = lo + (hi - lo + 1) / 2;
+      auto now = time::getWallTime();
+      if (now + time::milliseconds(1) >= deadline)
+        break;
+      ConstraintSet prefix(
+          ConstraintSet::constraints_ty(all.begin(), all.begin() + mid));
+      std::shared_ptr<const Assignment> model;
+      solver->setTimeout(deadline - now);
+      bool success = solver->getInitialValues(prefix, model, state.queryMetaData);
+      solver->setTimeout(time::Span());
+      if (success && model) {
+        best = model;
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+  }
+
+  // 3. (best is an empty model if there is nothing better: all zeros)
+  return best;
+}
+
 bool Executor::getSymbolicSolution(const ExecutionState &state,
                                    std::vector< 
                                    std::pair<std::string,
                                    std::vector<unsigned char> > >
                                    &res) {
-
-  solver->setTimeout(coreSolverTimeout);
+  // The test of every state must be written, also when the solver is slow or
+  // fails on the path constraints (the state could have been killed by the
+  // solver): the values then come from getFallbackModel. When dumping the
+  // states on halt and the budget for the minimization is used up, the values
+  // are those of a single model, without any further query.
+  const bool budgetUsedUp = false;
+  const auto minimizationStart = time::getWallTime();
+  // the deadline of the minimization of this test
+  time::Span minimizationTime =
+      maxTestMinimizationTime ? maxTestMinimizationTime
+                              : time::seconds(3600 * 24 * 365);
+  const auto deadline = minimizationStart + minimizationTime;
 
   ConstraintSet extendedConstraints(state.constraints);
   ConstraintManager cm(extendedConstraints);
@@ -6306,22 +6449,63 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
   // the preferred constraints.  See test/Features/PreferCex.c for
   // an example) While this process can be very expensive, it can
   // also make understanding individual test cases much easier.
-  for (auto& pi: state.cexPreferences) {
-    bool mustBeTrue;
-    // Attempt to bound byte to constraints held in cexPreferences
-    bool success =
-      solver->mustBeTrue(extendedConstraints, Expr::createIsZero(pi),
-        mustBeTrue, state.queryMetaData);
-    // If it isn't possible to add the condition without making the entire list
-    // UNSAT, then just continue to the next condition
-    if (!success) break;
-    // If the particular constraint operated on in this iteration through
-    // the loop isn't implied then add it to the list of constraints.
-    if (!mustBeTrue)
-      cm.addConstraint(pi);
+  if (!budgetUsedUp) {
+    solver->setTimeout(coreSolverTimeout);
+    for (auto& pi: state.cexPreferences) {
+      bool mustBeTrue;
+      // Attempt to bound byte to constraints held in cexPreferences
+      bool success =
+        solver->mustBeTrue(extendedConstraints, Expr::createIsZero(pi),
+          mustBeTrue, state.queryMetaData);
+      // If it isn't possible to add the condition without making the entire list
+      // UNSAT, then just continue to the next condition
+      if (!success) break;
+      // If the particular constraint operated on in this iteration through
+      // the loop isn't implied then add it to the list of constraints.
+      if (!mustBeTrue)
+        cm.addConstraint(pi);
+    }
+    solver->setTimeout(time::Span());
   }
 
-  // try to minimize sizes of symbolic-size objects
+  // try to minimize sizes of symbolic-size objects (the size is taken from
+  // the model below, it is the minimal one if the search succeeded)
+  if (!budgetUsedUp) {
+    auto sizeDeadline =
+        MinimizeTests ? deadline
+                      : time::getWallTime() +
+                            (coreSolverTimeout ? coreSolverTimeout
+                                               : time::seconds(3600 * 24 * 365));
+    for (const auto &symbolic : state.symbolics) {
+      const auto &mo = symbolic.first;
+      if (isa<ConstantExpr>(mo->size))
+        continue;
+      ref<ConstantExpr> minimal;
+      if (!getMinimalValue(extendedConstraints, mo->size, sizeDeadline,
+                           state.queryMetaData, minimal))
+        break;
+      cm.addConstraint(EqExpr::create(mo->size, minimal));
+    }
+  }
+
+  // a model of the constraints (never fails: see getFallbackModel)
+  std::shared_ptr<const Assignment> assignment;
+  bool fallback = false;
+  if (!state.symbolics.empty() || !state.nondetValues.empty()) {
+    solver->setTimeout(coreSolverTimeout);
+    bool success = solver->getInitialValues(extendedConstraints, assignment,
+                                            state.queryMetaData);
+    if (!success && extendedConstraints.size() != state.constraints.size())
+      // (without the additions for the readable values and small sizes)
+      success = solver->getInitialValues(state.constraints, assignment,
+                                         state.queryMetaData);
+    solver->setTimeout(time::Span());
+    if (!success || !assignment) {
+      assignment = getFallbackModel(state, budgetUsedUp);
+      fallback = true;
+    }
+  }
+
   std::vector<uint64_t> sizes;
   sizes.reserve(state.symbolics.size());
   for (const auto & symbolic : state.symbolics) {
@@ -6329,22 +6513,10 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(mo->size)) {
       sizes.push_back(CE->getZExtValue());
     } else {
-      auto pair = solver->getRange(extendedConstraints, mo->size, state.queryMetaData);
-      sizes.push_back(pair.first->getZExtValue());
-      cm.addConstraint(EqExpr::create(mo->size, pair.first));
-    }
-  }
-
-  std::vector< std::vector<unsigned char> > values;
-  std::shared_ptr<const Assignment> assignment(nullptr);
-  if (!state.symbolics.empty()) {
-    bool success = solver->getInitialValues(extendedConstraints, assignment, state.queryMetaData);
-    solver->setTimeout(time::Span());
-    if (!success) {
-      klee_warning("unable to compute initial values (invalid constraints?)!");
-      ExprPPrinter::printQuery(llvm::errs(), state.constraints,
-                               ConstantExpr::alloc(0, Expr::Bool));
-      return false;
+      auto size = assignment->evaluate(mo->size);
+      sizes.push_back(isa<ConstantExpr>(size)
+                          ? cast<ConstantExpr>(size)->getZExtValue()
+                          : 0);
     }
   }
 
@@ -6365,29 +6537,22 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
   // have different endiandness (byte 0 goes first, then byte 1, etc.)
   std::vector<std::pair<ref<ConstantExpr>, ref<ConstantExpr>>> nondets;
   if (!state.nondetValues.empty()) {
-    // Get the values of a model, then make them smaller as long as there is
-    // time (the time is limited because the queries can be slow with hard
-    // constraints, and the model is a valid test).
-    if (!assignment) {
-      solver->setTimeout(coreSolverTimeout);
-      bool success = solver->getInitialValues(extendedConstraints, assignment,
-                                              state.queryMetaData);
-      solver->setTimeout(time::Span());
-      if (!success) {
-        klee_warning("unable to compute initial values (invalid constraints?)!");
-        return false;
-      }
-    }
-    for (auto &it : state.nondetValues)
+    // The values of the model, made smaller as long as there is time (the
+    // time is limited because the queries can be slow with hard constraints,
+    // and the model is a valid test).
+    for (auto &it : state.nondetValues) {
+      auto value = assignment->evaluate(it.value.getValue());
+      auto segment = assignment->evaluate(it.value.getSegment());
+      // (a seed or a prefix does not have to define all the values)
       nondets.emplace_back(
-          cast<ConstantExpr>(assignment->evaluate(it.value.getValue())),
-          cast<ConstantExpr>(assignment->evaluate(it.value.getSegment())));
+          isa<ConstantExpr>(value) ? cast<ConstantExpr>(value)
+                                   : ConstantExpr::alloc(0, value->getWidth()),
+          isa<ConstantExpr>(segment)
+              ? cast<ConstantExpr>(segment)
+              : ConstantExpr::alloc(0, segment->getWidth()));
+    }
 
-    if (MinimizeTests) {
-      // (the unlimited minimization has a deadline too far to be reached)
-      auto deadline = time::getWallTime() +
-                      (maxTestMinimizationTime ? maxTestMinimizationTime
-                                               : time::seconds(3600 * 24 * 365));
+    if (MinimizeTests && !fallback && !budgetUsedUp) {
       if (!minimizeNondetValues(state, extendedConstraints, cm, deadline,
                                 nondets))
         klee_warning_once(nullptr, "minimizing the values of a test case took "
@@ -6585,43 +6750,63 @@ bool Executor::getMinimalValue(const ConstraintSet &constraints, ref<Expr> e,
 // get a sequence of inputs that drive the program to this state
 std::vector<NamedConcreteValue>
 Executor::getTestVector(const ExecutionState &state) {
-  std::vector<NamedConcreteValue> res;
-  res.reserve(state.nondetValues.size());
+  // If a query fails or times out, the values of all the inputs come from
+  // the fallback model (to be consistent), the test is never lost.
+  std::shared_ptr<const Assignment> fallback;
+  for (;;) {
+    std::vector<NamedConcreteValue> res;
+    res.reserve(state.nondetValues.size());
+    bool failed = false;
 
-  for (auto& it : state.nondetValues) {
-    ref<ConstantExpr> value;
-    bool success = solver->getValue(
-        state.constraints, it.value.getValue(), value, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
-
-    ref<ConstantExpr> segment;
-    success = solver->getValue(
-        state.constraints, it.value.getSegment(), segment, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
-    (void) success;
-
-    auto size = it.value.getValue()->getWidth();
-    assert(size <= 64 && "Does not support bitwidth > 64");
-    // XXX: SExtValue for signed types?
-    uint64_t val = value->getZExtValue();
-    uint64_t seg = segment->getZExtValue();
-
-    if (seg > 0) {
-        auto w = Context::get().getPointerWidth();
-        res.emplace_back(makeAPInt64(w, seg), makeAPInt64(w, val), it.name);
-    } else {
-        // (a negative signed value is not a valid uint64_t + isSigned)
-        res.emplace_back(value->getAPValue(), it.isSigned, it.name);
-    }
-    if (it.kinstruction) {
-        const auto& D = it.kinstruction->inst->getDebugLoc();
-        if (D) {
-            res.back().line = D.getLine();
-            res.back().col = D.getCol();
+    for (auto& it : state.nondetValues) {
+      ref<ConstantExpr> value, segment;
+      if (fallback) {
+        auto v = fallback->evaluate(it.value.getValue());
+        auto sg = fallback->evaluate(it.value.getSegment());
+        value = isa<ConstantExpr>(v) ? cast<ConstantExpr>(v)
+                                     : ConstantExpr::alloc(0, v->getWidth());
+        segment = isa<ConstantExpr>(sg) ? cast<ConstantExpr>(sg)
+                                        : ConstantExpr::alloc(0, sg->getWidth());
+      } else {
+        solver->setTimeout(coreSolverTimeout);
+        bool success = solver->getValue(state.constraints, it.value.getValue(),
+                                        value, state.queryMetaData) &&
+                       solver->getValue(state.constraints,
+                                        it.value.getSegment(), segment,
+                                        state.queryMetaData);
+        solver->setTimeout(time::Span());
+        if (!success) {
+          failed = true;
+          break;
         }
+      }
+
+      auto size = it.value.getValue()->getWidth();
+      assert(size <= 64 && "Does not support bitwidth > 64");
+      (void)size;
+      // XXX: SExtValue for signed types?
+      uint64_t val = value->getZExtValue();
+      uint64_t seg = segment->getZExtValue();
+
+      if (seg > 0) {
+          auto w = Context::get().getPointerWidth();
+          res.emplace_back(makeAPInt64(w, seg), makeAPInt64(w, val), it.name);
+      } else {
+          // (a negative signed value is not a valid uint64_t + isSigned)
+          res.emplace_back(value->getAPValue(), it.isSigned, it.name);
+      }
+      if (it.kinstruction) {
+          const auto& D = it.kinstruction->inst->getDebugLoc();
+          if (D) {
+              res.back().line = D.getLine();
+              res.back().col = D.getCol();
+          }
+      }
     }
+    if (!failed)
+      return res;
+    fallback = getFallbackModel(state, false);
   }
-  return res;
 }
 
 void Executor::getCoveredLines(const ExecutionState &state,

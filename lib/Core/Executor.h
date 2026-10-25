@@ -59,6 +59,7 @@ namespace llvm {
 
 namespace klee {
 class Array;
+class Assignment;
 struct Cell;
 class ExecutionState;
 class ExternalDispatcher;
@@ -196,6 +197,14 @@ private:
 
   /// The time limit for minimizing the nondeterministic values of a test case
   time::Span maxTestMinimizationTime;
+
+  /// A solver query failed (timed out) in a function that cannot terminate the
+  /// state (e.g., toConstant, which must return a value). The state is
+  /// terminated as soon as possible (when an instruction ends, or when
+  /// it would terminate or fork otherwise) and the value it got is not used
+  /// for any verdict.
+  ExecutionState *solverFailedState = nullptr;
+  std::string solverFailedMessage;
 
   /// Maximum time to allow for a single instruction.
   time::Span maxInstructionTime;
@@ -559,6 +568,21 @@ private:
   void terminateStateOnExecError(
       ExecutionState &state, const llvm::Twine &message,
       StateTerminationType = StateTerminationType::Execution);
+
+  /// Remember that a solver query of \p state failed, see solverFailedState.
+  void noteSolverFailure(ExecutionState &state, const std::string &message);
+
+  /// If a solver query of \p state failed (noteSolverFailure), terminate the
+  /// state as killed by the solver and return true. With nullptr, handle the
+  /// failure of any state.
+  bool terminateOnSolverFailure(ExecutionState *state);
+
+  /// A model of the constraints of \p state to get the values of its test
+  /// when the query for the model fails: a seed of the state, the model of
+  /// the longest prefix of the constraints found in time (unless \p
+  /// quick), or zeros. Never fails.
+  std::shared_ptr<const Assignment> getFallbackModel(const ExecutionState &state,
+                                                     bool quick);
 
   /// Call error handler and terminate state in case of solver errors
   /// (solver error or timeout)
