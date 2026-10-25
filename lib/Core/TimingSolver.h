@@ -33,6 +33,9 @@ public:
   std::unique_ptr<Solver> solver;
   bool simplifyExprs;
 
+private:
+  time::Span timeout;
+
 public:
   /// TimingSolver - Construct a new timing solver.
   ///
@@ -42,7 +45,11 @@ public:
   TimingSolver(std::unique_ptr<Solver> solver, bool simplifyExprs = true)
       : solver(std::move(solver)), simplifyExprs(simplifyExprs) {}
 
-  void setTimeout(time::Span t) { solver->setCoreSolverTimeout(t); }
+  void setTimeout(time::Span t) {
+    timeout = t;
+    solver->setCoreSolverTimeout(t);
+  }
+  time::Span getTimeout() const { return timeout; }
 
   std::string getConstraintLog(const Query &query) {
     return solver->getConstraintLog(query);
@@ -79,6 +86,20 @@ public:
                                            const ConstraintSet &,
                                            ref<Expr> query,
                                            SolverQueryMetaData &metaData);
+};
+
+/// Run the queries in the scope without a time limit (e.g., those that
+/// patch the seeds, which cannot be dropped)
+class UnboundedQueries {
+  TimingSolver &solver;
+  time::Span saved;
+
+public:
+  explicit UnboundedQueries(TimingSolver &solver)
+      : solver(solver), saved(solver.getTimeout()) {
+    solver.setTimeout(time::Span());
+  }
+  ~UnboundedQueries() { solver.setTimeout(saved); }
 };
 }
 

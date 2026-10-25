@@ -112,11 +112,17 @@ std::pair< ref<ConstantExpr>, ref<ConstantExpr> > Solver::getRange(const Query& 
   ref<Expr> e = query.expr;
   Expr::Width width = e->getWidth();
   uint64_t min, max;
+  // (if a query fails, e.g., times out, the range is not known: any value)
+  auto unknown = [&]() {
+    return std::make_pair(ConstantExpr::create(0, width),
+                          ConstantExpr::create(bits64::maxValueOfNBits(width),
+                                               width));
+  };
 
   if (width==1) {
     Solver::Validity result;
     if (!evaluate(query, result))
-      assert(0 && "computeValidity failed");
+      return unknown();
     switch (result) {
     case Solver::True: 
       min = max = 1; break;
@@ -141,8 +147,8 @@ std::pair< ref<ConstantExpr>, ref<ConstantExpr> > Solver::getRange(const Query& 
                                     ConstantExpr::create(0, width))),
                    res);
 
-      assert(success && "FIXME: Unhandled solver failure");
-      (void) success;
+      if (!success)
+        return unknown();
 
       if (res) {
         hi = mid;
@@ -163,8 +169,8 @@ std::pair< ref<ConstantExpr>, ref<ConstantExpr> > Solver::getRange(const Query& 
                                                                       width))), 
                 res);
 
-    assert(success && "FIXME: Unhandled solver failure");      
-    (void) success;
+    if (!success)
+        return unknown();
 
     if (res) {
       min = 0;
@@ -180,8 +186,8 @@ std::pair< ref<ConstantExpr>, ref<ConstantExpr> > Solver::getRange(const Query& 
                                                                         width))),
                     res);
 
-        assert(success && "FIXME: Unhandled solver failure");      
-        (void) success;
+        if (!success)
+        return unknown();
 
         if (res) {
           hi = mid;
@@ -204,8 +210,8 @@ std::pair< ref<ConstantExpr>, ref<ConstantExpr> > Solver::getRange(const Query& 
                                                                        width))),
                    res);
 
-      assert(success && "FIXME: Unhandled solver failure");      
-      (void) success;
+      if (!success)
+        return unknown();
 
       if (res) {
         hi = mid;

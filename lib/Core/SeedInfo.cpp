@@ -101,6 +101,8 @@ void SeedInfo::patchSeed(const ExecutionState &state,
     }
   }
 
+  UnboundedQueries unbounded(*solver);
+
   for (auto const &[array, i] : directReads) {
     ref<Expr> read = ReadExpr::create(UpdateList(array, 0),
                                       ConstantExpr::alloc(i, Expr::Int32));

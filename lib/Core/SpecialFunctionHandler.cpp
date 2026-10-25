@@ -562,9 +562,14 @@ void SpecialFunctionHandler::handleAssume(ExecutionState &state,
     e = NeExpr::create(e, ConstantExpr::create(0, e->getWidth()));
   
   bool res;
-  bool success __attribute__((unused)) = executor.solver->mustBeFalse(
-      state.constraints, e, res, state.queryMetaData);
-  assert(success && "FIXME: Unhandled solver failure");
+  bool success = executor.solver->mustBeFalse(state.constraints, e, res,
+                                              state.queryMetaData);
+  if (!success) {
+    state.pc = state.prevPC;
+    executor.terminateStateOnSolverError(state,
+                                         "Query timed out (klee_assume).");
+    return;
+  }
   if (res) {
     executor.terminateStateOnUserError(
         state, "invalid klee_assume call (provably false)", !SilentKleeAssume);
@@ -675,14 +680,17 @@ void SpecialFunctionHandler::handlePrintRange(ExecutionState &state,
   if (!isa<ConstantExpr>(arguments[1].value)) {
     // FIXME: Pull into a unique value method?
     ref<ConstantExpr> value;
-    bool success __attribute__((unused)) = executor.solver->getValue(
+    bool success = executor.solver->getValue(
         state.constraints, arguments[1].value, value, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
-    bool res;
-    success = executor.solver->mustBeTrue(state.constraints,
-                                          EqExpr::create(arguments[1].value, value),
-                                          res, state.queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
+    bool res = false;
+    if (success)
+      success = executor.solver->mustBeTrue(
+          state.constraints, EqExpr::create(arguments[1].value, value), res,
+          state.queryMetaData);
+    if (!success) {
+      llvm::errs() << " (unknown, the query failed)\n";
+      return;
+    }
     if (res) {
       llvm::errs() << " == " << value;
     } else { 
@@ -1010,7 +1018,12 @@ void SpecialFunctionHandler::handleMakeSymbolic(ExecutionState &state,
             ZExtExpr::create(arguments[1].value, Context::get().getPointerWidth()),
             mo->getSizeExpr()),
         res, s->queryMetaData);
-    assert(success && "FIXME: Unhandled solver failure");
+    if (!success) {
+      s->pc = s->prevPC;
+      executor.terminateStateOnSolverError(
+          *s, "Query timed out (klee_make_symbolic size).");
+      return;
+    }
     
     if (res) {
       executor.executeMakeSymbolic(*s, mo, name);

@@ -661,6 +661,8 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
       interpreterHandler->getOutputFilename(SOLVER_QUERIES_KQUERY_FILE_NAME));
 
   this->solver = std::make_unique<TimingSolver>(std::move(solver), EqualitySubstitution);
+  // (every query is limited by -max-solver-time, unless a caller changes it)
+  this->solver->setTimeout(coreSolverTimeout);
   memory = std::make_unique<MemoryManager>(&arrayCache);
 
   initializeSearchOptions();
@@ -1139,6 +1141,7 @@ void Executor::branch(ExecutionState &state,
            siie = seeds.end(); siit != siie; ++siit) {
       unsigned i;
       for (i=0; i<N; ++i) {
+        UnboundedQueries unbounded(*solver);
         ref<ConstantExpr> res;
         bool success = solver->getValue(
             state.constraints, siit->assignment.evaluate(conditions[i]), res,
@@ -1269,7 +1272,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
   solver->setTimeout(timeout);
   bool success = solver->evaluate(current.constraints, condition, res,
                                   current.queryMetaData);
-  solver->setTimeout(time::Span());
+  solver->setTimeout(coreSolverTimeout);
   if (!success) {
     current.pc = current.prevPC;
     if (haltLimited) {
@@ -1333,6 +1336,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
     // Is seed extension still ok here?
     for (std::vector<SeedInfo>::iterator siit = it->second.begin(), 
            siie = it->second.end(); siit != siie; ++siit) {
+      UnboundedQueries unbounded(*solver);
       ref<ConstantExpr> res;
       bool success = solver->getValue(current.constraints,
                                       siit->assignment.evaluate(condition), res,
@@ -1395,6 +1399,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       std::vector<SeedInfo> &falseSeeds = seedMap[falseState];
       for (std::vector<SeedInfo>::iterator siit = seeds.begin(), 
              siie = seeds.end(); siit != siie; ++siit) {
+        UnboundedQueries unbounded(*solver);
         ref<ConstantExpr> res;
         bool success = solver->getValue(current.constraints,
                                         siit->assignment.evaluate(condition),
@@ -1472,6 +1477,7 @@ void Executor::addConstraint(ExecutionState &state, ref<Expr> condition) {
     for (std::vector<SeedInfo>::iterator siit = it->second.begin(), 
            siie = it->second.end(); siit != siie; ++siit) {
       bool res;
+      UnboundedQueries unbounded(*solver);
       bool success = solver->mustBeFalse(state.constraints,
                                          siit->assignment.evaluate(condition),
                                          res, state.queryMetaData);
@@ -1538,7 +1544,7 @@ ref<Expr> Executor::toUnique(const ExecutionState &state,
           isTrue)
         result = value;
     }
-    solver->setTimeout(time::Span());
+    solver->setTimeout(coreSolverTimeout);
   }
   
   return result;
@@ -1557,7 +1563,7 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
     solver->setTimeout(coreSolverTimeout);
     bool success =
         solver->getValue(state.constraints, e, cvalue, state.queryMetaData);
-    solver->setTimeout(time::Span());
+    solver->setTimeout(coreSolverTimeout);
     if (!success) {
       // The state cannot go on with a value (the solver timed out or failed).
       // Return a dummy zero and terminate the state as killed by the solver
@@ -1652,6 +1658,7 @@ void Executor::executeGetValue(ExecutionState &state,
       ref<Expr> cond = siit->assignment.evaluate(expr);
       cond = optimizer.optimizeExpr(cond, true);
       ref<ConstantExpr> value;
+      UnboundedQueries unbounded(*solver);
       bool success =
           solver->getValue(state.constraints, cond, value, state.queryMetaData);
       assert(success && "FIXME: Unhandled solver failure");
@@ -5303,7 +5310,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
       if (!ce) {
         solver->setTimeout(coreSolverTimeout);
         success = solver->getValue(state.constraints, value, ce, state.queryMetaData);
-        solver->setTimeout(time::Span());
+        solver->setTimeout(coreSolverTimeout);
         if (!success) {
           state.pc = state.prevPC;
           terminateStateOnSolverError(
@@ -5813,7 +5820,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
                toConstant(state, address.getOffset(), "resolveOne failure"));
     success = state.addressSpace.resolveOneConstantSegment(address, op);
   }
-  solver->setTimeout(time::Span());
+  solver->setTimeout(coreSolverTimeout);
 
   bool resolveSingleObject = SingleObjectResolution;
 
@@ -5878,7 +5885,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
           state.constraints, isEqualSegment, inBoundsSegment, state.queryMetaData);
       bool success = solver->mustBeTrue(
           state.constraints, isOffsetInBounds, inBoundsOffset, state.queryMetaData);
-      solver->setTimeout(time::Span());
+      solver->setTimeout(coreSolverTimeout);
       if (!success || !successSegment) {
         state.pc = state.prevPC;
         terminateStateOnSolverError(state, "Query timed out (bounds check).");
@@ -5923,7 +5930,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
     solver->setTimeout(coreSolverTimeout);
     incomplete = state.addressSpace.resolve(state, solver.get(), addressOptim,
                                             rl, 0, coreSolverTimeout);
-    solver->setTimeout(time::Span());
+    solver->setTimeout(coreSolverTimeout);
   } else {
     rl.push_back(op); // we already have the object pair, no need to look for it
   }
@@ -6407,7 +6414,7 @@ Executor::getFallbackModel(const ExecutionState &state, bool quick) {
       std::shared_ptr<const Assignment> model;
       solver->setTimeout(deadline - now);
       bool success = solver->getInitialValues(prefix, model, state.queryMetaData);
-      solver->setTimeout(time::Span());
+      solver->setTimeout(coreSolverTimeout);
       if (success && model) {
         best = model;
         lo = mid;
@@ -6465,7 +6472,7 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
       if (!mustBeTrue)
         cm.addConstraint(pi);
     }
-    solver->setTimeout(time::Span());
+    solver->setTimeout(coreSolverTimeout);
   }
 
   // try to minimize sizes of symbolic-size objects (the size is taken from
@@ -6492,14 +6499,19 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
   std::shared_ptr<const Assignment> assignment;
   bool fallback = false;
   if (!state.symbolics.empty() || !state.nondetValues.empty()) {
-    solver->setTimeout(coreSolverTimeout);
+    // (without the budget, a hard path must not delay the other states:
+    // the query gets at most a second)
+    time::Span modelTimeout = coreSolverTimeout;
+    if (budgetUsedUp && (!modelTimeout || modelTimeout > time::seconds(1)))
+      modelTimeout = time::seconds(1);
+    solver->setTimeout(modelTimeout);
     bool success = solver->getInitialValues(extendedConstraints, assignment,
                                             state.queryMetaData);
     if (!success && extendedConstraints.size() != state.constraints.size())
       // (without the additions for the readable values and small sizes)
       success = solver->getInitialValues(state.constraints, assignment,
                                          state.queryMetaData);
-    solver->setTimeout(time::Span());
+    solver->setTimeout(coreSolverTimeout);
     if (!success || !assignment) {
       assignment = getFallbackModel(state, budgetUsedUp);
       fallback = true;
@@ -6638,7 +6650,7 @@ bool Executor::minimizeNondetValues(
     std::shared_ptr<const Assignment> model;
     solver->setTimeout(deadline - now);
     bool success = solver->getInitialValues(withSmall, model, state.queryMetaData);
-    solver->setTimeout(time::Span());
+    solver->setTimeout(coreSolverTimeout);
     if (!success) {
       // either UNSAT (try a larger range) or the timeout (no time left)
       if (time::getWallTime() + time::milliseconds(1) >= deadline)
@@ -6671,7 +6683,7 @@ bool Executor::minimizeNondetValues(
   std::shared_ptr<const Assignment> model;
   solver->setTimeout(coreSolverTimeout);
   bool success = solver->getInitialValues(constraints, model, state.queryMetaData);
-  solver->setTimeout(time::Span());
+  solver->setTimeout(coreSolverTimeout);
   if (!success)
     return false;
   for (size_t i = 0; i < nondets.size(); ++i) {
@@ -6701,7 +6713,7 @@ bool Executor::getMinimalValue(const ConstraintSet &constraints, ref<Expr> e,
     solver->setTimeout(deadline - now);
     bool success = must ? solver->mustBeTrue(constraints, cond, res, metaData)
                         : solver->mayBeTrue(constraints, cond, res, metaData);
-    solver->setTimeout(time::Span());
+    solver->setTimeout(coreSolverTimeout);
     return success;
   };
 
@@ -6774,7 +6786,7 @@ Executor::getTestVector(const ExecutionState &state) {
                        solver->getValue(state.constraints,
                                         it.value.getSegment(), segment,
                                         state.queryMetaData);
-        solver->setTimeout(time::Span());
+        solver->setTimeout(coreSolverTimeout);
         if (!success) {
           failed = true;
           break;
