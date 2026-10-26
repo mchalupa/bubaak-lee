@@ -147,6 +147,7 @@ static constexpr std::array handlerInfo = {
   add("__VERIFIER_nondet_double", handleVerifierNondetDouble, true),
   add("__VERIFIER_nondet_loff_t", handleVerifierNondetLOffT, true),
   add("__VERIFIER_nondet_long", handleVerifierNondetLong, true),
+  add("__VERIFIER_nondet_longlong", handleVerifierNondetLongLong, true),
   add("__VERIFIER_nondet_memory", handleVerifierNondetMemory, true),
   add("__VERIFIER_nondet_pchar", handleVerifierNondetPChar, true),
   add("__VERIFIER_nondet_pointer", handleVerifierNondetPointer, true),
@@ -158,6 +159,7 @@ static constexpr std::array handlerInfo = {
   add("__VERIFIER_nondet_uchar", handleVerifierNondetUChar, true),
   add("__VERIFIER_nondet_uint", handleVerifierNondetUInt, true),
   add("__VERIFIER_nondet_ulong", handleVerifierNondetULong, true),
+  add("__VERIFIER_nondet_ulonglong", handleVerifierNondetULongLong, true),
   add("__VERIFIER_nondet_unsigned", handleVerifierNondetUnsigned, true),
   add("__VERIFIER_nondet_ushort", handleVerifierNondetUShort, true),
 
@@ -1324,6 +1326,24 @@ void SpecialFunctionHandler::handleVerifierNondetULong(ExecutionState &state,
 
   handleVerifierNondetType(state, target, Expr::Int64,
                            /* isSigned = */ false, "__VERIFIER_nondet_ulong");
+}
+
+void SpecialFunctionHandler::handleVerifierNondetLongLong(
+    ExecutionState &state, KInstruction *target,
+    const std::vector<Cell> &arguments) {
+  assert(arguments.empty() && "Wrong number of arguments");
+
+  handleVerifierNondetType(state, target, Expr::Int64,
+                           /* isSigned = */ true, "__VERIFIER_nondet_longlong");
+}
+
+void SpecialFunctionHandler::handleVerifierNondetULongLong(
+    ExecutionState &state, KInstruction *target,
+    const std::vector<Cell> &arguments) {
+  assert(arguments.empty() && "Wrong number of arguments");
+
+  handleVerifierNondetType(state, target, Expr::Int64,
+                           /* isSigned = */ false, "__VERIFIER_nondet_ulonglong");
 }
 
 void SpecialFunctionHandler::handleVerifierNondetPointer(ExecutionState &state,

@@ -152,6 +152,8 @@ namespace klee {
     HANDLER(handleVerifierNondetLOffT);
     HANDLER(handleVerifierNondetLong);
     HANDLER(handleVerifierNondetULong);
+    HANDLER(handleVerifierNondetLongLong);
+    HANDLER(handleVerifierNondetULongLong);
     HANDLER(handleVerifierNondetPointer);
     HANDLER(handleVerifierNondetPChar);
     HANDLER(handleVerifierNondetPthreadT);
