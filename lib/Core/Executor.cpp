@@ -6710,6 +6710,15 @@ bool Executor::minimizeNondetValues(
     }
     if (!any)
       break;
+    // (the constraints may decide the range, e.g., x == 123456, adding a
+    // constraint that simplifies to false is not allowed)
+    small = ConstraintManager::simplifyExpr(constraints, small);
+    if (auto *CE = dyn_cast<ConstantExpr>(small)) {
+      if (CE->isFalse())
+        continue;
+      // (all the values are in the range already)
+      break;
+    }
     auto now = time::getWallTime();
     if (now + time::milliseconds(1) >= deadline)
       return false;
