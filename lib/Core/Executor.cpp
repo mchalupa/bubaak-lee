@@ -6465,6 +6465,9 @@ Executor::getFallbackModel(const ExecutionState &state, bool quick) {
   return best;
 }
 
+// the bytes of an object of a symbolic size written to a test at most
+static const uint64_t MaxSymbolicSizeInTest = 1 << 20;
+
 bool Executor::getSymbolicSolution(const ExecutionState &state,
                                    std::vector< 
                                    std::pair<std::string,
@@ -6590,9 +6593,21 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
       sizes.push_back(CE->getZExtValue());
     } else {
       auto size = assignment->evaluate(mo->size);
-      sizes.push_back(isa<ConstantExpr>(size)
-                          ? cast<ConstantExpr>(size)->getZExtValue()
-                          : 0);
+      uint64_t value = isa<ConstantExpr>(size)
+                           ? cast<ConstantExpr>(size)->getZExtValue()
+                           : 0;
+      // the size was not minimized (no time) and the model can give a huge
+      // one (e.g., 2^32 + 1), the bytes after the bound are not written
+      // (they are zeros, the values of the model are only for the bytes
+      // that the path reads, see `asVector` below)
+      if (value > MaxSymbolicSizeInTest) {
+        klee_warning_once(nullptr,
+                          "the symbolic size of an object in a test case is "
+                          "%" PRIu64 " bytes, writing only %" PRIu64,
+                          value, MaxSymbolicSizeInTest);
+        value = MaxSymbolicSizeInTest;
+      }
+      sizes.push_back(value);
     }
   }
 

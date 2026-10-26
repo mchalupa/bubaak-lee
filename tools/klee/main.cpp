@@ -602,6 +602,14 @@ bool KleeHandler::writeTestCaseKTest(
   b.args = m_argv;
   b.symArgvs = 0;
   b.symArgvLen = 0;
+  for (const auto &obj : out) {
+    // (numBytes has 32 bits)
+    if (obj.second.size() > UINT32_MAX) {
+      klee_warning("an object of the test case is too large (%zu bytes), "
+                   "losing the test case", obj.second.size());
+      return false;
+    }
+  }
   b.numObjects = out.size();
   b.objects = new KTestObject[b.numObjects];
   assert(b.objects);
