@@ -169,6 +169,15 @@ namespace {
                 cl::cat(TestCaseCat));
 
 
+  cl::opt<bool> MarkTestsCoveringNew(
+      "mark-tests-covering-new", cl::init(false),
+      cl::desc("Write an empty file testNNNNNN.newcov next to every test case "
+               "of a state that covers new code (its new coverage was not "
+               "claimed by an earlier test), for any kind of test (exit, "
+               "error, early, kill tests). Requires coverage tracking "
+               "(--output-istats, on by default) (default=false)"),
+      cl::cat(TestCaseCat));
+
   /*** Startup options ***/
 
   cl::OptionCategory StartCat("Startup options",
@@ -1311,6 +1320,10 @@ void KleeHandler::processTestCase(const ExecutionState &state,
         }
       }
     }
+
+    // the Executor claims the coverage after this function returns
+    if (MarkTestsCoveringNew && state.hasUnclaimedCoverage())
+      openTestFile("newcov", test_id);
 
     if (MaxTests && m_numGeneratedTests == MaxTests)
       m_interpreter->setHaltExecution(true);
