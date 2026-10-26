@@ -63,10 +63,10 @@ static inline void __klee_libc_write_symbolic(void *dst, size_t len,
 }
 
 /* Stop exploring the path: the model cannot continue with only real
- * behaviors (reported as an under-approximation) */
+ * behaviors (reported as an under-approximation, the state is terminated
+ * with a kill test, see klee_unsupported) */
 static inline void __klee_libc_unsupported(const char *function) {
-  klee_report_under_approximation(function);
-  klee_silent_exit(0);
+  klee_unsupported(function);
 }
 
 #endif

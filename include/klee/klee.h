@@ -120,6 +120,11 @@ extern "C" {
    * "KLEE: WARNING: under-approximation: NAME"), so the exploration of all
    * paths does not prove the absence of errors */
   void klee_report_under_approximation(const char *name);
+  /* The function NAME is not modelled: report the under-approximation and
+   * terminate the state like a call of an unsupported external function (with
+   * -write-kill-tests, the test of the state is a kill test of type external,
+   * so that another tool can continue from the state). Does not return. */
+  void klee_unsupported(const char *name) __attribute__((noreturn));
   void klee_prefer_cex(void *object, uintptr_t condition);
   void klee_posix_prefer_cex(void *object, uintptr_t condition);
   void klee_mark_global(void *object);

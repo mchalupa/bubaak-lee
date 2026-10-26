@@ -137,6 +137,7 @@ namespace klee {
     HANDLER(handleWarning);
     HANDLER(handleWarningOnce);
     HANDLER(handleReportUnderApproximation);
+    HANDLER(handleUnsupported);
     HANDLER(handleScopeEnter);
     HANDLER(handleScopeLeave);
     HANDLER(handleVerifierNondetInt);

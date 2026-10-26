@@ -130,6 +130,7 @@ static constexpr std::array handlerInfo = {
   add("klee_warning", handleWarning, false),
   add("klee_warning_once", handleWarningOnce, false),
   add("klee_report_under_approximation", handleReportUnderApproximation, false),
+  addDNR("klee_unsupported", handleUnsupported),
   add("malloc", handleMalloc, true),
   add("memalign", handleMemalign, true),
   add("realloc", handleRealloc, true),
@@ -668,6 +669,19 @@ void SpecialFunctionHandler::handleReportUnderApproximation(
   assert(arguments.size() == 1 &&
          "invalid number of arguments to klee_report_under_approximation");
   Executor::reportUnderApproximation(readStringAtAddress(state, arguments[0]));
+}
+
+void SpecialFunctionHandler::handleUnsupported(
+    ExecutionState &state, KInstruction *target,
+    const std::vector<Cell> &arguments) {
+  assert(arguments.size() == 1 &&
+         "invalid number of arguments to klee_unsupported");
+  std::string name = readStringAtAddress(state, arguments[0]);
+  Executor::reportUnderApproximation(name);
+  // like an unmodelled external function: with -write-kill-tests, the test
+  // of the state is written as a kill test (type external)
+  executor.terminateStateOnExecError(state, "unsupported function: " + name,
+                                     StateTerminationType::External);
 }
 
 void SpecialFunctionHandler::handlePrintRange(ExecutionState &state,
