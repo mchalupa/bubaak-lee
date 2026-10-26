@@ -1622,9 +1622,11 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
     const auto &testfile = interpreterHandler->writeKillTest(
         state, ("Concretized (reason: " + reason + ")\n").c_str(),
         "concretized");
-    if (!testfile.empty())
+    if (!testfile.empty()) {
       klee_warning("Wrote kill test: %s (type: concretized, reason: %s)",
                    testfile.c_str(), reason.c_str());
+      state.claimCoverage();
+    }
   }
 
   if (concretize)
@@ -4434,10 +4436,12 @@ void Executor::reportError(const llvm::Twine &message,
         type.resize(type.size() - 4);
       klee_warning("Wrote kill test: %s (type: %s, reason: %s)",
                    testfile.c_str(), type.c_str(), message.str().c_str());
+      state.claimCoverage();
     }
     return;
   }
   interpreterHandler->processTestCase(state, msg.str().c_str(), file_suffix);
+  state.claimCoverage();
 }
 
 void Executor::terminateStateOnExit(ExecutionState &state) {
@@ -4486,11 +4490,13 @@ void Executor::terminateStateOnExit(ExecutionState &state) {
 
   if ((ExitOnErrorType.empty() || WriteExitTests) &&
       ((shouldWriteTest(state) &&
-        (!OnlyOutputExitsCoveringNew || state.coveredNew)) ||
-       (AlwaysOutputSeeds && seedMap.count(&state))))
+        (!OnlyOutputExitsCoveringNew || state.hasUnclaimedCoverage())) ||
+       (AlwaysOutputSeeds && seedMap.count(&state)))) {
     interpreterHandler->processTestCase(
         state, nullptr,
         terminationTypeFileExtension(StateTerminationType::Exit).c_str());
+    state.claimCoverage();
+  }
   interpreterHandler->incPathsCompleted();
   terminateState(state, StateTerminationType::Exit);
 }
@@ -4513,6 +4519,7 @@ void Executor::terminateStateEarly(ExecutionState &state, const Twine &message,
     interpreterHandler->processTestCase(
         state, (message + "\n").str().c_str(),
         terminationTypeFileExtension(reason).c_str());
+    state.claimCoverage();
   }
 
   terminateState(state, reason);
@@ -4574,6 +4581,8 @@ void Executor::writeDroppedBranchTest(const ExecutionState &state,
   interpreterHandler->processTestCase(
       *dropped, "Fork inhibited, the branch is not explored.\n",
       terminationTypeFileExtension(StateTerminationType::Interrupted).c_str());
+  // the test covers the path up to here (the tokens are shared)
+  dropped->claimCoverage();
 }
 
 bool shouldExitOn(StateTerminationType reason) {

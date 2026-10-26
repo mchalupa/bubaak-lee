@@ -23,6 +23,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <cassert>
 #include <iomanip>
 #include <map>
@@ -115,6 +116,7 @@ ExecutionState::ExecutionState(const ExecutionState& state):
                              ? state.unwindingInformation->clone()
                              : nullptr),
     coveredNew(state.coveredNew),
+    newCoverage(state.newCoverage),
     forkDisabled(state.forkDisabled),
     overApproximation(state.overApproximation),
     base_addrs(state.base_addrs),
@@ -131,7 +133,33 @@ ExecutionState *ExecutionState::branch() {
   falseState->coveredNew = false;
   falseState->coveredLines.clear();
 
+  // the claimed coverage is not needed anymore (both states share the rest)
+  auto claimed = [](const std::shared_ptr<bool> &t) { return *t; };
+  newCoverage.erase(
+      std::remove_if(newCoverage.begin(), newCoverage.end(), claimed),
+      newCoverage.end());
+  falseState->newCoverage = newCoverage;
+
   return falseState;
+}
+
+void ExecutionState::markNewCoverage() {
+  // a token that only this state has and that is not claimed can take the
+  // new coverage too
+  if (!newCoverage.empty() && newCoverage.back().use_count() == 1 &&
+      !*newCoverage.back())
+    return;
+  newCoverage.push_back(std::make_shared<bool>(false));
+}
+
+bool ExecutionState::hasUnclaimedCoverage() const {
+  return std::any_of(newCoverage.begin(), newCoverage.end(),
+                     [](const std::shared_ptr<bool> &t) { return !*t; });
+}
+
+void ExecutionState::claimCoverage() const {
+  for (const auto &t : newCoverage)
+    *t = true;
 }
 
 void ExecutionState::pushFrame(KInstIterator caller, KFunction *kf) {

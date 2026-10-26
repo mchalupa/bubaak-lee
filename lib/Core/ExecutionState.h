@@ -316,6 +316,22 @@ public:
   /// @brief Whether a new instruction was covered in this state
   bool coveredNew = false;
 
+  /// @brief The code that the path covered first and that no test covers yet
+  /// (-only-output-exits-covering-new): a token per new coverage, shared with
+  /// the states forked after it and claimed by the first test of any of them
+  /// (the test of a state covers its whole path natively). Unlike coveredNew,
+  /// which only one of the forked states keeps, so the path that exits may
+  /// have lost it.
+  std::vector<std::shared_ptr<bool>> newCoverage;
+
+  /// @brief Record new coverage (see newCoverage)
+  void markNewCoverage();
+  /// @brief Is there new coverage that no test covers yet?
+  bool hasUnclaimedCoverage() const;
+  /// @brief A test of this state was written: it covers the new coverage
+  /// (the claimed tokens are dropped at the next branch)
+  void claimCoverage() const;
+
   /// @brief Disables forking for this state. Set by user code
   bool forkDisabled = false;
 
