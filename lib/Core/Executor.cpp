@@ -4118,6 +4118,11 @@ void Executor::run(ExecutionState &initialState) {
         dumpExecutionTree();
       updateStates(&state);
 
+      // the memory cap applies when seeding too (lastState is only compared
+      // as a key of seedMap, so it may be a state terminated here)
+      if (!checkMemoryUsage())
+        updateStates(nullptr);
+
       if ((stats::instructions % 1000) == 0) {
         int numSeeds = 0, numStates = 0;
         for (std::map<ExecutionState*, std::vector<SeedInfo> >::iterator
