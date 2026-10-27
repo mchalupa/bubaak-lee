@@ -4910,6 +4910,15 @@ cl::opt<bool> FailUnmodelledLibcCalls(
              "has no model, instead of assuming it is pure (its result "
              "would not be a real one) (default=true)"),
     cl::cat(ExtCallsCat));
+
+cl::opt<bool> SkipUncheckedOutput(
+    "skip-unchecked-output", cl::init(false),
+    cl::desc("With --external-calls=pure, skip a call of a printing function "
+             "whose result is not used if it cannot be executed natively (it "
+             "reads an object of a symbolic size), also if its reads were "
+             "not checked (a read out of the object is missed) "
+             "(default=false)"),
+    cl::cat(ExtCallsCat));
 } // namespace
 
 // Is the function a function of the C library (exported by the C or the math
@@ -4980,33 +4989,41 @@ Executor::StringCheck Executor::checkString(ExecutionState &state,
   if (!offCE)
     return StringCheck::Unknown;
   if (!sizeCE) {
-    // an object of a symbolic size: only a concrete string that is
-    // terminated in the object on all paths is recognized
+    // an object of a symbolic size: only a string that is terminated in the
+    // object on all paths is recognized (a zero byte below the size)
     std::string str;
-    uint64_t bound = std::min<uint64_t>(os->getSizeBound(), 1 << 20);
+    bool symbolic = false;
+    ref<Expr> someZero = ConstantExpr::alloc(0, Expr::Bool);
+    // (not an object without a bound of its size, a long string in it
+    // would make the queries too expensive)
+    uint64_t bound = std::min<uint64_t>(os->getSizeBound(), 4096);
     for (uint64_t i = offCE->getZExtValue(); i < bound; ++i) {
       ref<Expr> byte = os->read8(i).getValue();
       auto *ce = dyn_cast<ConstantExpr>(byte);
-      if (!ce)
-        return StringCheck::Unknown;
-      if (!ce->isZero()) {
+      if (ce && !ce->isZero()) {
         str += static_cast<char>(ce->getZExtValue(8));
         continue;
       }
-      bool inObject = false;
-      if (!solver->mustBeTrue(
-              state.constraints,
-              UltExpr::create(ConstantExpr::create(i, sizeExpr->getWidth()),
-                              sizeExpr),
-              inObject, state.queryMetaData) ||
-          !inObject)
-        return StringCheck::Unknown;
-      concrete = true;
-      if (contents)
-        *contents = str;
-      return StringCheck::Terminated;
+      ref<Expr> inObject = UltExpr::create(
+          ConstantExpr::create(i, sizeExpr->getWidth()), sizeExpr);
+      if (ce) {
+        // a concrete zero: the string ends here (if it did not before)
+        someZero = OrExpr::create(someZero, inObject);
+        break;
+      }
+      symbolic = true;
+      someZero = OrExpr::create(
+          someZero, AndExpr::create(Expr::createIsZero(byte), inObject));
     }
-    return StringCheck::Unknown;
+    bool mustTerminate = false;
+    if (!solver->mustBeTrue(state.constraints, someZero, mustTerminate,
+                            state.queryMetaData) ||
+        !mustTerminate)
+      return StringCheck::Unknown;
+    concrete = !symbolic;
+    if (concrete && contents)
+      *contents = str;
+    return StringCheck::Terminated;
   }
   uint64_t size = sizeCE->getZExtValue();
   uint64_t offset = offCE->getZExtValue();
@@ -5241,6 +5258,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   // natively (with concrete arguments).
   bool skipOutput = false;
   bool checkedOutput = false;
+  // a printing function that does not write (no %n found)
+  bool outputOnly = false;
   if (ExternalCalls == ExternalCallPolicy::Pure &&
       outputExternals.count(name) > 0) {
     bool hasWrite, unknown, symbolicContents;
@@ -5248,6 +5267,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
                          symbolicContents))
       return;
     checkedOutput = !unknown && !hasWrite;
+    outputOnly = !hasWrite;
     if (checkedOutput &&
         (symbolicContents || hasSymbolicScalarsOnly(arguments))) {
       if (!target->inst->use_empty()) {
@@ -5465,11 +5485,12 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
           if (op.second->getSizeBound() == 0 ||
               (op.second->getSizeBound() > op.first->allocatedSize)) {
-            if (checkedOutput && target->inst->use_empty()) {
+            if ((checkedOutput || (SkipUncheckedOutput && outputOnly)) &&
+                target->inst->use_empty()) {
               // a printing function whose reads were checked
-              // (checkOutputCall) and whose result is not used: it cannot be
-              // executed natively, but printing does not change the state of
-              // the program, so it is skipped
+              // (checkOutputCall) or are not checked, and whose result is
+              // not used: it cannot be executed natively, but printing does
+              // not change the state of the program, so it is skipped
               return;
             }
             terminateStateOnExecError(state,
