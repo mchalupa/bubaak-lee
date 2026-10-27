@@ -1,13 +1,13 @@
 // The result of printing symbolic values (not executed natively) is any
 // admissible value (also an error), or a value of a success with
-// --output-call-result=success
+// --output-calls=test
 // RUN: %clang %s -emit-llvm %O0opt -c -o %t.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out --external-calls=pure %t.bc 2>&1 | FileCheck %s -check-prefix=CHECK-ADM
 // RUN: rm -rf %t.klee-out
-// RUN: %klee --output-dir=%t.klee-out --external-calls=pure --output-call-result=success %t.bc 2>&1 | FileCheck %s -check-prefix=CHECK-SUCC
+// RUN: %klee --output-dir=%t.klee-out --external-calls=pure --output-calls=test %t.bc 2>&1 | FileCheck %s -check-prefix=CHECK-SUCC
 // RUN: rm -rf %t.klee-out
-// RUN: %klee --output-dir=%t.klee-out --external-calls=pure --malloc-symbolic-contents --skip-unchecked-output %t.bc unterminated 2>&1 | FileCheck %s -check-prefix=CHECK-ADM
+// RUN: %klee --output-dir=%t.klee-out --external-calls=pure --malloc-symbolic-contents --output-calls=test %t.bc unterminated 2>&1 | FileCheck %s -check-prefix=CHECK-SUCC
 // CHECK-ADM-NOT: failed external call
 // CHECK-ADM-NOT: symbolic-sized object
 // CHECK-ADM: completed paths = 4

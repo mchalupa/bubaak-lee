@@ -8,7 +8,7 @@
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out --external-calls=pure --malloc-symbolic-contents %t.bc symbolic unterminated 2>&1 | FileCheck %s -check-prefix=CHECK-KILL
 // RUN: rm -rf %t.klee-out
-// RUN: %klee --output-dir=%t.klee-out --external-calls=pure --malloc-symbolic-contents --skip-unchecked-output %t.bc symbolic unterminated 2>&1 | FileCheck %s
+// RUN: %klee --output-dir=%t.klee-out --external-calls=pure --malloc-symbolic-contents --output-calls=test %t.bc symbolic unterminated 2>&1 | FileCheck %s
 // CHECK-NOT: symbolic-sized object
 // CHECK: completed paths = 2
 // CHECK-KILL: symbolic-sized object

@@ -4911,29 +4911,24 @@ cl::opt<bool> FailUnmodelledLibcCalls(
              "would not be a real one) (default=true)"),
     cl::cat(ExtCallsCat));
 
-cl::opt<bool> SkipUncheckedOutput(
-    "skip-unchecked-output", cl::init(false),
-    cl::desc("With --external-calls=pure, skip a call of a printing function "
-             "whose result is not used if it cannot be executed natively (it "
-             "reads an object of a symbolic size), also if its reads were "
-             "not checked (a read out of the object is missed) "
-             "(default=false)"),
-    cl::cat(ExtCallsCat));
+enum class OutputCallsKind { Verify, Test };
 
-enum class OutputCallResultKind { Admissible, Success };
-
-cl::opt<OutputCallResultKind> OutputCallResult(
-    "output-call-result",
-    cl::desc("With --external-calls=pure, the result of a call of a printing "
-             "function that is not executed natively (it prints symbolic "
-             "values) (default=admissible)"),
-    cl::values(clEnumValN(OutputCallResultKind::Admissible, "admissible",
-                          "Any value that the function may return, also an "
-                          "error"),
-               clEnumValN(OutputCallResultKind::Success, "success",
-                          "A value that the function returns on success "
-                          "(the paths are those of a real run)")),
-    cl::init(OutputCallResultKind::Admissible), cl::cat(ExtCallsCat));
+cl::opt<OutputCallsKind> OutputCalls(
+    "output-calls",
+    cl::desc("With --external-calls=pure, the calls of printing functions "
+             "that cannot be executed natively (they print symbolic values or "
+             "from an object of a symbolic size); a call whose result is not "
+             "used is skipped (default=verify)"),
+    cl::values(
+        clEnumValN(OutputCallsKind::Verify, "verify",
+                   "The reads of the call must be checked (the path is "
+                   "terminated otherwise), the result is any value that the "
+                   "function may return, also an error"),
+        clEnumValN(OutputCallsKind::Test, "test",
+                   "Also a call whose reads were not checked is skipped (a "
+                   "read out of the object is missed), the result is a value "
+                   "of a success (the paths are those of a real run)")),
+    cl::init(OutputCallsKind::Verify), cl::cat(ExtCallsCat));
 } // namespace
 
 // Is the function a function of the C library (exported by the C or the math
@@ -4988,7 +4983,7 @@ void Executor::bindOutputCallResult(ExecutionState &state,
     // number (puts, fputs)
     success = SgeExpr::create(result, ConstantExpr::create(0, width));
   }
-  if (OutputCallResult == OutputCallResultKind::Success)
+  if (OutputCalls == OutputCallsKind::Test)
     addConstraint(state, success);
   else if (name != "printf" && name != "fprintf") // (negative on an error)
     addConstraint(state, OrExpr::create(success, EqExpr::create(result, eof)));
@@ -5523,7 +5518,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
           if (op.second->getSizeBound() == 0 ||
               (op.second->getSizeBound() > op.first->allocatedSize)) {
-            if (checkedOutput || (SkipUncheckedOutput && outputOnly)) {
+            if (checkedOutput ||
+                (OutputCalls == OutputCallsKind::Test && outputOnly)) {
               // a printing function whose reads were checked
               // (checkOutputCall) or are not checked: it cannot be executed
               // natively, but printing does not change the state of the

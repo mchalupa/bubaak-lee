@@ -331,7 +331,7 @@ private:
                        bool &unknown, bool &symbolicContents);
 
   /// Bind a nondet result of a call of a printing function that is not
-  /// executed (see -output-call-result)
+  /// executed (see -output-calls)
   void bindOutputCallResult(ExecutionState &state, KInstruction *target,
                             const std::string &name,
                             const std::vector<Cell> &arguments);
