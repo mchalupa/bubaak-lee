@@ -4977,8 +4977,37 @@ Executor::StringCheck Executor::checkString(ExecutionState &state,
   ref<Expr> offExpr = mo->getOffsetExpr(pointer.getOffset());
   auto *sizeCE = dyn_cast<ConstantExpr>(sizeExpr);
   auto *offCE = dyn_cast<ConstantExpr>(offExpr);
-  if (!sizeCE || !offCE)
+  if (!offCE)
     return StringCheck::Unknown;
+  if (!sizeCE) {
+    // an object of a symbolic size: only a concrete string that is
+    // terminated in the object on all paths is recognized
+    std::string str;
+    uint64_t bound = std::min<uint64_t>(os->getSizeBound(), 1 << 20);
+    for (uint64_t i = offCE->getZExtValue(); i < bound; ++i) {
+      ref<Expr> byte = os->read8(i).getValue();
+      auto *ce = dyn_cast<ConstantExpr>(byte);
+      if (!ce)
+        return StringCheck::Unknown;
+      if (!ce->isZero()) {
+        str += static_cast<char>(ce->getZExtValue(8));
+        continue;
+      }
+      bool inObject = false;
+      if (!solver->mustBeTrue(
+              state.constraints,
+              UltExpr::create(ConstantExpr::create(i, sizeExpr->getWidth()),
+                              sizeExpr),
+              inObject, state.queryMetaData) ||
+          !inObject)
+        return StringCheck::Unknown;
+      concrete = true;
+      if (contents)
+        *contents = str;
+      return StringCheck::Terminated;
+    }
+    return StringCheck::Unknown;
+  }
   uint64_t size = sizeCE->getZExtValue();
   uint64_t offset = offCE->getZExtValue();
   if (offset >= size)
@@ -5436,6 +5465,13 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
           if (op.second->getSizeBound() == 0 ||
               (op.second->getSizeBound() > op.first->allocatedSize)) {
+            if (checkedOutput && target->inst->use_empty()) {
+              // a printing function whose reads were checked
+              // (checkOutputCall) and whose result is not used: it cannot be
+              // executed natively, but printing does not change the state of
+              // the program, so it is skipped
+              return;
+            }
             terminateStateOnExecError(state,
                                       "external call with symbolic-sized object that "
                                       "has no real virtual process memory: " +
