@@ -2,7 +2,7 @@
 // of unmodelled functions of the C library are reported as
 // under-approximations and their paths fail (unless
 // --fail-unmodelled-libc-calls=false).
-// Printing symbolic values is skipped if the result is not used.
+// Printing symbolic values is skipped, its result is nondet if it is used.
 // RUN: %clang %s -emit-llvm %O0opt -g -c -o %t.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out --libc=klee --external-calls=pure --fail-unmodelled-libc-calls=false %t.bc 2>&1 | FileCheck %s
@@ -12,9 +12,10 @@
 // CHECK-NOT: under-approximation: my_undefined
 // CHECK-NOT: under-approximation: printf
 // CHECK: KLEE: WARNING: under-approximation: strverscmp
-// CHECK: ERROR: {{.*}}UnderApproximation.c:37: failed external call: printf (the result of printing symbolic values)
+// CHECK-NOT: failed external call: printf
+// CHECK: completed paths = 2
 // CHECK-FAIL: KLEE: WARNING: under-approximation: strverscmp
-// CHECK-FAIL: ERROR: {{.*}}UnderApproximation.c:35: failed external call: strverscmp
+// CHECK-FAIL: ERROR: {{.*}}UnderApproximation.c:36: failed external call: strverscmp
 
 #define _GNU_SOURCE
 #include "klee/klee.h"

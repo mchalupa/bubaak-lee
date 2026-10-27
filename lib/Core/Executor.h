@@ -330,6 +330,12 @@ private:
                        const std::vector<Cell> &arguments, bool &hasWrite,
                        bool &unknown, bool &symbolicContents);
 
+  /// Bind a nondet result of a call of a printing function that is not
+  /// executed (see -output-call-result)
+  void bindOutputCallResult(ExecutionState &state, KInstruction *target,
+                            const std::string &name,
+                            const std::vector<Cell> &arguments);
+
   ObjectState *bindObjectInState(ExecutionState &state, const MemoryObject *mo,
                                  bool isLocal, const Array *array = 0);
 

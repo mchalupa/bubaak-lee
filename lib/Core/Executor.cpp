@@ -4919,6 +4919,21 @@ cl::opt<bool> SkipUncheckedOutput(
              "not checked (a read out of the object is missed) "
              "(default=false)"),
     cl::cat(ExtCallsCat));
+
+enum class OutputCallResultKind { Admissible, Success };
+
+cl::opt<OutputCallResultKind> OutputCallResult(
+    "output-call-result",
+    cl::desc("With --external-calls=pure, the result of a call of a printing "
+             "function that is not executed natively (it prints symbolic "
+             "values) (default=admissible)"),
+    cl::values(clEnumValN(OutputCallResultKind::Admissible, "admissible",
+                          "Any value that the function may return, also an "
+                          "error"),
+               clEnumValN(OutputCallResultKind::Success, "success",
+                          "A value that the function returns on success "
+                          "(the paths are those of a real run)")),
+    cl::init(OutputCallResultKind::Admissible), cl::cat(ExtCallsCat));
 } // namespace
 
 // Is the function a function of the C library (exported by the C or the math
@@ -4954,6 +4969,32 @@ static bool hasSymbolicBytes(const ObjectState *os, uint64_t size) {
 // of the C library that is assumed to be pure, or an external call whose
 // memory accesses are not checked): exploring all paths does not prove the
 // absence of errors anymore.
+void Executor::bindOutputCallResult(ExecutionState &state,
+                                    KInstruction *target,
+                                    const std::string &name,
+                                    const std::vector<Cell> &arguments) {
+  Expr::Width width = getWidthForLLVMType(target->inst->getType());
+  ref<Expr> result =
+      createNondetValue(state, width, true, target, name, false).getValue();
+  ref<Expr> eof = ConstantExpr::create(-1, width); // EOF
+  ref<Expr> success;
+  bool character = name == "putchar" || name == "fputc" || name == "putc";
+  if (character && !arguments.empty()) {
+    // the printed character (converted to unsigned char)
+    ref<Expr> c = ExtractExpr::create(arguments[0].getValue(), 0, Expr::Int8);
+    success = EqExpr::create(result, ZExtExpr::create(c, width));
+  } else {
+    // the number of printed characters (printf, fprintf) or a nonnegative
+    // number (puts, fputs)
+    success = SgeExpr::create(result, ConstantExpr::create(0, width));
+  }
+  if (OutputCallResult == OutputCallResultKind::Success)
+    addConstraint(state, success);
+  else if (name != "printf" && name != "fprintf") // (negative on an error)
+    addConstraint(state, OrExpr::create(success, EqExpr::create(result, eof)));
+  bindLocal(target, state, result);
+}
+
 void Executor::reportUnderApproximation(const std::string &name) {
   static std::set<std::string> reported;
   if (reported.insert(name).second)
@@ -5272,10 +5313,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
         (symbolicContents || hasSymbolicScalarsOnly(arguments))) {
       if (!target->inst->use_empty()) {
         // the result depends on the symbolic values
-        terminateStateOnError(state,
-                              "failed external call: " + name +
-                                  " (the result of printing symbolic values)",
-                              StateTerminationType::External);
+        bindOutputCallResult(state, target, name, arguments);
         return;
       }
       skipOutput = true;
@@ -5485,12 +5523,13 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
           if (op.second->getSizeBound() == 0 ||
               (op.second->getSizeBound() > op.first->allocatedSize)) {
-            if ((checkedOutput || (SkipUncheckedOutput && outputOnly)) &&
-                target->inst->use_empty()) {
+            if (checkedOutput || (SkipUncheckedOutput && outputOnly)) {
               // a printing function whose reads were checked
-              // (checkOutputCall) or are not checked, and whose result is
-              // not used: it cannot be executed natively, but printing does
-              // not change the state of the program, so it is skipped
+              // (checkOutputCall) or are not checked: it cannot be executed
+              // natively, but printing does not change the state of the
+              // program, so it is skipped (its result is modelled)
+              if (!target->inst->use_empty())
+                bindOutputCallResult(state, target, name, arguments);
               return;
             }
             terminateStateOnExecError(state,
