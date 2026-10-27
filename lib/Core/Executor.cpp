@@ -140,6 +140,13 @@ cl::opt<bool> SingleObjectResolution(
     cl::desc("Try to resolve memory reads/writes to single objects "
              "when offsets are symbolic (default=false)"),
     cl::init(false), cl::cat(MiscCat));
+cl::opt<bool> CoverSelects(
+    "cover-selects", cl::init(false),
+    cl::desc("Fork at a select with a symbolic condition while a side of it "
+             "is not covered (the sides of branches folded into selects get "
+             "separate paths and tests) (default=false)"),
+    cl::cat(TestGenCat));
+
 } // namespace klee
 
 namespace {
@@ -3019,6 +3026,24 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     KValue cond = eval(ki, 0, state);
     const Cell &tCell = eval(ki, 1, state);
     const Cell &fCell = eval(ki, 2, state);
+    if (CoverSelects && statsTracker &&
+        state.stack.back().kf->trackCoverage &&
+        !i->getOperand(0)->getType()->isVectorTy() &&
+        !isa<ConstantExpr>(cond.getValue()) &&
+        !statsTracker->isBranchFullyVisited()) {
+      // a side of the select is not covered yet (it may be a branch folded
+      // into a select): the sides get separate states (see markBranchVisited
+      // for the hidden dependency on the statistic id of the instruction)
+      KValue tValue = tCell, fValue = fCell;
+      ref<Expr> c = optimizer.optimizeExpr(cond.getValue(), false);
+      StatePair sides = fork(state, c, false, BranchType::Conditional);
+      statsTracker->markBranchVisited(sides.first, sides.second);
+      if (sides.first)
+        bindLocal(ki, *sides.first, tValue);
+      if (sides.second)
+        bindLocal(ki, *sides.second, fValue);
+      break;
+    }
     bindLocal(ki, state, cond.Select(tCell, fCell));
     break;
   }

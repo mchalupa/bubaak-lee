@@ -52,6 +52,10 @@ DISABLE_WARNING_POP
 using namespace klee;
 using namespace llvm;
 
+namespace klee {
+extern cl::opt<bool> CoverSelects;
+}
+
 ///
 
 namespace klee {
@@ -217,9 +221,13 @@ StatsTracker::StatsTracker(Executor &_executor, std::string _objectFilename,
       }
       
       if (kf->trackCoverage) {
-        if (BranchInst *bi = dyn_cast<BranchInst>(ki->inst))
+        if (BranchInst *bi = dyn_cast<BranchInst>(ki->inst)) {
           if (!bi->isUnconditional())
             numBranches++;
+        } else if (CoverSelects && isa<SelectInst>(ki->inst) &&
+                   !ki->inst->getOperand(0)->getType()->isVectorTy()) {
+          numBranches++; // the sides of a select are covered as of a branch
+        }
       }
     }
   }
@@ -435,6 +443,14 @@ void StatsTracker::markBranchVisited(ExecutionState *visitedTrue,
       else ++partialBranches;
     }
   }
+}
+
+bool StatsTracker::isBranchFullyVisited() const {
+  if (!OutputIStats)
+    return true;
+  unsigned id = theStatisticManager->getIndex();
+  return theStatisticManager->getIndexedValue(stats::trueBranches, id) &&
+         theStatisticManager->getIndexedValue(stats::falseBranches, id);
 }
 
 void StatsTracker::writeStatsHeader() {

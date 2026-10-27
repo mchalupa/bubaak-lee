@@ -87,6 +87,9 @@ namespace klee {
     void markBranchVisited(ExecutionState *visitedTrue,
                            ExecutionState *visitedFalse);
 
+    // were both sides of the current branch (or select) visited?
+    bool isBranchFullyVisited() const;
+
     // called when execution is done and stats files should be flushed
     void done();
 
