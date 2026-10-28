@@ -23,6 +23,8 @@
 #include "klee/Solver/Solver.h"
 #include "klee/System/Time.h"
 
+#include "llvm/Support/raw_ostream.h"
+
 #include <map>
 #include <memory>
 #include <set>
@@ -176,25 +178,21 @@ struct CleanupPhaseUnwindingInformation : public UnwindingInformation {
   }
 };
 
-/// @brief A decision at a symbolic branch on a path: the taken branch (0 or
-/// 1 for a two-way branch, the index of the case otherwise). The decisions
-/// form a list from the last one to the first one, shared by the states.
-struct PathDecision {
-  mutable std::shared_ptr<const PathDecision> parent;
-  std::uint32_t decision;
-  /// a hash of the decisions and the conditions of the branches on the path
-  /// (a replay that does not take the same branches gets another hash)
-  std::uint64_t hash;
+/// @brief An entry of a path: the ID of a marked branch (the metadata
+/// `bbk.branch`, see closeprog/PathPass.cpp) and the index of the successor
+/// that the branch took (the first index of that block among the successors)
+inline std::uint64_t pathEntry(std::uint32_t id, std::uint32_t dir) {
+  return (std::uint64_t(id) << 32) | dir;
+}
 
-  PathDecision(std::shared_ptr<const PathDecision> parent,
-               std::uint32_t decision, unsigned conditionHash)
-      : parent(std::move(parent)), decision(decision) {
-    std::uint64_t h = this->parent ? this->parent->hash : 0;
-    for (std::uint64_t v : {std::uint64_t(decision), std::uint64_t(conditionHash)})
-      h = (h ^ v) * 0x100000001b3ULL + 0x9e3779b97f4a7c15ULL;
-    hash = h;
-  }
-  ~PathDecision() {
+/// @brief A part of a path: the entries after those of the parent. The
+/// chunks are shared by the states, a state appends to its last chunk only
+/// if no other state or chunk refers to it.
+struct PathChunk {
+  mutable std::shared_ptr<const PathChunk> parent;
+  std::vector<std::uint64_t> entries;
+
+  ~PathChunk() {
     // (no recursion on long paths)
     auto p = std::move(parent);
     while (p && p.use_count() == 1)
@@ -202,24 +200,34 @@ struct PathDecision {
   }
 };
 
-/// @brief The decisions on the path that ends with `last` as a string (see
-/// ExecutionState::pathString)
-std::string pathString(const PathDecision *last);
+/// @brief The start of a .path file (the path of a test): the entries
+/// follow until the end of the file
+inline const std::string PathFileMagic("BBKP\x01", 5);
 
-/// @brief A node of the trie of prefix paths (see -prefix-paths)
+/// @brief The start of a list of paths (unfinished.paths, killed.paths,
+/// -prefix-paths): the records `varint(len) TAG varint(n)` and n entries
+/// follow (TAG is the id of a prefix path, empty in the output of KLEE)
+inline const std::string PathListMagic("BBKR\x01", 5);
+
+/// @brief Write the number as a varint (LEB128)
+void writePathVarint(llvm::raw_ostream &os, std::uint32_t v);
+
+/// @brief Write the entries of a path in the format of the .path files (see
+/// -write-unfinished-paths): the varints `id dir` of the entries
+void writePathEntries(llvm::raw_ostream &os,
+                      const std::vector<std::uint64_t> &entries);
+
+/// @brief A node of the radix trie of prefix paths (see -prefix-paths)
 struct PrefixPathNode {
-  std::map<std::uint32_t, std::unique_ptr<PrefixPathNode>> children;
+  /// the entries of the path from the parent to this node (empty at the root)
+  std::vector<std::uint64_t> label;
+  /// the children by the first entry of their labels
+  std::map<std::uint64_t, std::unique_ptr<PrefixPathNode>> children;
   /// the ids of the paths that end here
   std::vector<std::string> ids;
   /// the ids of the paths that end here and only seeded states continue
   /// (see -seeded-prefix-paths)
   std::vector<std::string> seededIds;
-  /// the hash of the path (see PathDecision::hash) of the paths that end
-  /// here, the state must have the same hash (if the paths have hashes)
-  std::uint64_t hash = 0;
-  bool hasHash = false;
-  /// the paths that end here have different hashes (no state matches)
-  bool conflict = false;
   /// the paths of the subtree were reported as used
   bool used = false;
 };
@@ -388,14 +396,25 @@ public:
   /// may be infeasible, so its errors are not reported
   std::string overApproximation;
 
-  /// @brief The last decision at a symbolic branch on the path (with
-  /// -write-unfinished-paths or -prefix-paths, null at the start)
-  std::shared_ptr<const PathDecision> decisions;
+  /// @brief Does the state record its path (-write-unfinished-paths,
+  /// -prefix-paths)? The path is empty at the start.
+  bool recordsPath = false;
+
+  /// @brief Did the path call __bbk_async (bbk-infinite-loops of bubaak: a
+  /// function that creates threads or handles signals)? Then the marked
+  /// loops do not end it (-kill-infinite-loops).
+  bool asyncSeen = false;
+
+  /// @brief The last chunk of the path (the marked branches the state took),
+  /// null if the path is empty
+  std::shared_ptr<PathChunk> path;
 
   /// @brief With -prefix-paths, the node of the trie of prefix paths where
-  /// the state is: the state explores only the prefix paths until it
-  /// reaches the end of one of them (then it is null, the state is free)
+  /// the state is (it took the first `prefixPos` entries of its label): the
+  /// state explores only the prefix paths until it reaches the end of one of
+  /// them (then it is null, the state is free)
   const PrefixPathNode *prefixNode = nullptr;
+  std::uint32_t prefixPos = 0;
 
   /// @brief Mapping symbolic address expressions to concrete base addresses
   using base_addrs_t = std::map<ref<Expr>, ref<ConstantExpr>>;
@@ -405,13 +424,11 @@ public:
   base_mo_t base_mos;
 
 public:
-  /// @brief The decisions on the path as a string: the decisions from the
-  /// first one, 0 to 9 as digits, the others as `(N)`, then `#` and the
-  /// hash of the path in hex
-  std::string pathString() const;
+  /// @brief Append the entry to the path
+  void appendPath(std::uint64_t entry);
 
-  /// @brief The hash of the path (see PathDecision::hash)
-  std::uint64_t pathHash() const { return decisions ? decisions->hash : 0; }
+  /// @brief The entries of the path from the first one
+  std::vector<std::uint64_t> pathEntries() const;
 
 #ifdef KLEE_UNITTEST
   // provide this function only in the context of unittests

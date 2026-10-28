@@ -120,33 +120,51 @@ ExecutionState::ExecutionState(const ExecutionState& state):
     newCoverage(state.newCoverage),
     forkDisabled(state.forkDisabled),
     overApproximation(state.overApproximation),
-    decisions(state.decisions),
+    recordsPath(state.recordsPath),
+    asyncSeen(state.asyncSeen),
+    path(state.path),
     prefixNode(state.prefixNode),
+    prefixPos(state.prefixPos),
     base_addrs(state.base_addrs),
     base_mos(state.base_mos) {
   for (const auto &cur_mergehandler: openMergeStack)
     cur_mergehandler->addOpenState(this);
 }
 
-std::string ExecutionState::pathString() const {
-  return klee::pathString(decisions.get());
+void ExecutionState::appendPath(std::uint64_t entry) {
+  // (a chunk shared with another state or chunk does not change)
+  if (!path || path.use_count() > 1 || path->entries.size() >= 4096) {
+    auto chunk = std::make_shared<PathChunk>();
+    chunk->parent = std::move(path);
+    path = std::move(chunk);
+  }
+  path->entries.push_back(entry);
 }
 
-std::string klee::pathString(const PathDecision *last) {
-  std::vector<std::uint32_t> path;
-  for (const PathDecision *d = last; d; d = d->parent.get())
-    path.push_back(d->decision);
-  std::string res;
-  for (auto it = path.rbegin(); it != path.rend(); ++it) {
-    if (*it < 10)
-      res += static_cast<char>('0' + *it);
-    else
-      res += "(" + std::to_string(*it) + ")";
+std::vector<std::uint64_t> ExecutionState::pathEntries() const {
+  std::vector<const PathChunk *> chunks;
+  for (const PathChunk *c = path.get(); c; c = c->parent.get())
+    chunks.push_back(c);
+  std::vector<std::uint64_t> entries;
+  for (auto it = chunks.rbegin(); it != chunks.rend(); ++it)
+    entries.insert(entries.end(), (*it)->entries.begin(), (*it)->entries.end());
+  return entries;
+}
+
+void klee::writePathVarint(llvm::raw_ostream &os, std::uint32_t v) {
+  while (v >= 0x80) {
+    os << static_cast<char>((v & 0x7f) | 0x80);
+    v >>= 7;
   }
-  char hash[17];
-  std::snprintf(hash, sizeof(hash), "%016llx",
-                static_cast<unsigned long long>(last ? last->hash : 0));
-  return res + "#" + hash;
+  os << static_cast<char>(v);
+}
+
+void klee::writePathEntries(llvm::raw_ostream &os,
+                            const std::vector<std::uint64_t> &entries) {
+  for (std::uint64_t e : entries) {
+    writePathVarint(os, static_cast<std::uint32_t>(e >> 32));
+    writePathVarint(os, static_cast<std::uint32_t>(e));
+  }
 }
 
 ExecutionState *ExecutionState::branch() {

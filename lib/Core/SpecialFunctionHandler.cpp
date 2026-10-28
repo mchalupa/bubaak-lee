@@ -46,6 +46,21 @@ using namespace llvm;
 using namespace klee;
 
 namespace {
+// the kinds of the loops marked by bbk-infinite-loops of bubaak (the
+// positions of the bits of the argument of __bbk_infinite_loop: 1, 2)
+enum InfiniteLoopKind { InfLoopIdempotent = 0, InfLoopNoExit = 1 };
+
+cl::bits<InfiniteLoopKind> KillInfiniteLoops(
+    "kill-infinite-loops", cl::CommaSeparated,
+    cl::desc("End the paths in the loops marked by bbk-infinite-loops of "
+             "bubaak of these kinds as completed, without the checks of the "
+             "end of the program (unless the path called __bbk_async)"),
+    cl::values(clEnumValN(InfLoopIdempotent, "idempotent",
+                          "an iteration does not change the state"),
+               clEnumValN(InfLoopNoExit, "no-exit",
+                          "the loop cannot be left")),
+    cl::cat(TerminationCat));
+
 cl::opt<bool>
     ReadablePosix("readable-posix-inputs", cl::init(false),
                   cl::desc("Prefer creation of POSIX inputs (command-line "
@@ -96,6 +111,8 @@ static constexpr std::array handlerInfo = {
   SpecialFunctionHandler::HandlerInfo{ "exit", &SpecialFunctionHandler::handleExit, true, false, true },
   addDNR("klee_abort", handleAbort),
   addDNR("klee_silent_exit", handleSilentExit),
+  add("__bbk_infinite_loop", handleInfiniteLoop, false),
+  add("__bbk_async", handleAsync, false),
   addDNR("klee_report_error", handleReportError),
   add("aligned_alloc", handleMemalign, true),
   add("calloc", handleCalloc, true),
@@ -344,6 +361,27 @@ void SpecialFunctionHandler::handleSilentExit(
     const std::vector<Cell> &arguments) {
   assert(arguments.size() == 1 && "invalid number of arguments to exit");
   executor.terminateStateEarlyUser(state, "");
+}
+
+// A loop that the pass bbk-infinite-loops of bubaak marked: the path can run
+// forever there; for the kinds of -kill-infinite-loops it ends as completed
+// but the program does not end (no checks of leaks), otherwise nothing
+void SpecialFunctionHandler::handleInfiniteLoop(
+    ExecutionState &state, KInstruction *target,
+    const std::vector<Cell> &arguments) {
+  assert(arguments.size() == 1 && "invalid number of arguments to __bbk_infinite_loop");
+  auto kind = dyn_cast<ConstantExpr>(arguments[0].value);
+  assert(kind && "the kind of __bbk_infinite_loop is not a constant");
+  if ((kind->getZExtValue() & KillInfiniteLoops.getBits()) && !state.asyncSeen)
+    executor.terminateStateOnExit(state, /*infiniteLoop=*/true);
+}
+
+// The program calls a function that creates threads or handles signals
+// (bbk-infinite-loops): the marked loops do not end the path anymore
+void SpecialFunctionHandler::handleAsync(ExecutionState &state,
+                                         KInstruction *target,
+                                         const std::vector<Cell> &arguments) {
+  state.asyncSeen = true;
 }
 
 void SpecialFunctionHandler::handleAssert(ExecutionState &state,

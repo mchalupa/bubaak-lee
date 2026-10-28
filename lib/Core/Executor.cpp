@@ -174,28 +174,27 @@ cl::opt<bool> WriteIncompleteTests(
 cl::opt<bool> WriteUnfinishedPaths(
     "write-unfinished-paths",
     cl::init(false),
-    cl::desc("Write the paths (the decisions at symbolic branches) of the "
-             "states from which KLEE does not explore all paths and that it "
-             "can continue: the states dumped on halt (all of them, also "
-             "with -max-dumped-states), terminated early, and branches "
-             "dropped because forking was inhibited. The paths are written "
-             "to unfinished-paths.txt (one per line) and to the object "
-             "klee_path of the tests. The paths of the states killed by an "
-             "execution error (e.g., an unsupported external call) are "
-             "written to killed-paths.txt (default=false)"),
+    cl::desc("Record the paths of the states: the marked branches (the "
+             "metadata bbk.branch, see bubaak's closeprog/PathPass.cpp) and "
+             "the successors they took. Every test gets its path as "
+             "testN.path; the paths of the states from which KLEE does not "
+             "explore all paths and that it can continue (the states dumped "
+             "on halt, all of them, also with -max-dumped-states, terminated "
+             "early, and branches dropped because forking was inhibited) are "
+             "written to unfinished.paths, the paths of the states killed by "
+             "an execution error (e.g., an unsupported external call) to "
+             "killed.paths (default=false)"),
     cl::cat(TestGenCat));
 
 cl::opt<std::string> PrefixPaths(
     "prefix-paths",
-    cl::desc("Explore only the paths that continue the paths in the file "
-             "(lines `ID PATH`, see -write-unfinished-paths): the other "
-             "paths are pruned and the states that did not reach the end of "
-             "a prefix path are not dumped on halt. The IDs of the prefix "
-             "paths whose ends were reached (all paths below them are "
-             "explored or their unfinished paths written) are written to "
-             "used-prefix-paths.txt. A state that does not reach the end of a "
-             "prefix path as the run that wrote it (the hashes of the paths "
-             "differ) is pruned"),
+    cl::desc("Explore only the paths that continue the paths in the file (a "
+             "list of paths with their IDs, see -write-unfinished-paths): "
+             "the other paths are pruned and the states that did not reach "
+             "the end of a prefix path are not dumped on halt. The IDs of "
+             "the prefix paths whose ends were reached (all paths below them "
+             "are explored or their unfinished paths written) are written to "
+             "used-prefix-paths.txt"),
     cl::cat(SeedingCat));
 
 cl::opt<std::string> SeededPrefixPaths(
@@ -203,7 +202,7 @@ cl::opt<std::string> SeededPrefixPaths(
     cl::desc("Like -prefix-paths (both can be given), but only seeded states "
              "continue from the ends of these paths, the other states are "
              "pruned there (e.g., the paths of the states killed by an "
-             "unsupported call, see killed-paths.txt)"),
+             "unsupported call, see killed.paths)"),
     cl::cat(SeedingCat));
 
 cl::opt<unsigned> MaxDumpedStates(
@@ -1153,17 +1152,28 @@ bool Executor::branchingPermitted(const ExecutionState &state) const {
   return true;
 }
 
+/// The first index of the block among the successors of the terminator (the
+/// direction of a marked branch on a path, see closeprog/PathPass.cpp)
+static unsigned firstSuccessorIndex(const Instruction *terminator,
+                                    const BasicBlock *successor) {
+  for (unsigned i = 0, e = terminator->getNumSuccessors(); i != e; ++i)
+    if (terminator->getSuccessor(i) == successor)
+      return i;
+  llvm_unreachable("not a successor");
+}
+
 void Executor::branch(ExecutionState &state,
                       const std::vector<ref<Expr>> &conditions,
                       std::vector<ExecutionState *> &result,
-                      BranchType reason) {
+                      BranchType reason,
+                      const std::vector<std::uint64_t> *entries) {
   TimerStatIncrementer timer(stats::forkTime);
   unsigned N = conditions.size();
   assert(N);
-  // a decision on the path (values of seeds are not decisions, there are
-  // such branches only with seeds)
-  bool decides = N > 1 && reason != BranchType::GetVal;
-  auto allowed = [&](unsigned i) { return !decides || prefixAllows(state, i); };
+  assert(!entries || entries->size() == N);
+  auto allowed = [&](unsigned i) {
+    return !entries || prefixAllows(state, (*entries)[i]);
+  };
 
   if (!branchingPermitted(state)) {
     std::vector<unsigned> choices;
@@ -1182,8 +1192,8 @@ void Executor::branch(ExecutionState &state,
         result.push_back(&state);
       } else {
         if (allowed(i))
-          writeDroppedBranchTest(state, decides ? i : -1, conditions[i],
-                                 conditions[i]->hash());
+          writeDroppedBranchTest(state, entries ? (*entries)[i] : NoPathEntry,
+                                 conditions[i]);
         result.push_back(nullptr);
       }
     }
@@ -1251,13 +1261,12 @@ void Executor::branch(ExecutionState &state,
     }
   }
 
-  if (decides) {
-    // follow only the prefix paths
+  if (entries) {
+    // (only the prefix paths are followed)
     for (unsigned i = 0; i < N; ++i) {
       if (!result[i])
         continue;
-      if (!prefixAllows(*result[i], i) ||
-          !decide(*result[i], i, conditions[i]->hash())) {
+      if (!decide(*result[i], (*entries)[i])) {
         pruneState(*result[i]);
         result[i] = nullptr;
       }
@@ -1329,7 +1338,8 @@ ref<Expr> Executor::maxStaticPctChecks(ExecutionState &current,
 }
 
 Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
-                                   bool isInternal, BranchType reason) {
+                                   bool isInternal, BranchType reason,
+                                   std::int64_t mark) {
   // (a value got after a failed query is not used for a branch)
   if (terminateOnSolverFailure(&current))
     return StatePair(nullptr, nullptr);
@@ -1380,19 +1390,21 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
     return StatePair(nullptr, nullptr);
   }
 
-  // a symbolic branch (a decision on the path)
-  bool symbolic = res == Solver::Unknown;
-  unsigned conditionHash = symbolic ? condition->hash() : 0;
-  if (symbolic && current.prefixNode) {
+  // a marked branch, its sides are entries of the path
+  bool marked = mark >= 0 && recordPaths;
+  std::uint64_t trueEntry = marked ? pathEntry(mark, 0) : NoPathEntry;
+  std::uint64_t falseEntry = marked ? pathEntry(mark, 1) : NoPathEntry;
+  if (marked && current.prefixNode) {
     // follow only the prefix paths
-    bool trueAllowed = prefixAllows(current, 1);
-    bool falseAllowed = prefixAllows(current, 0);
-    if (!trueAllowed && !falseAllowed) {
-      // (the prefix paths take another kind of branch here)
+    bool trueAllowed = prefixAllows(current, trueEntry);
+    bool falseAllowed = prefixAllows(current, falseEntry);
+    if ((!trueAllowed || res == Solver::False) &&
+        (!falseAllowed || res == Solver::True)) {
+      // (the prefix paths take another branch here)
       pruneState(current);
       return StatePair(nullptr, nullptr);
     }
-    if (!(trueAllowed && falseAllowed)) {
+    if (res == Solver::Unknown && !(trueAllowed && falseAllowed)) {
       if (isSeeding) {
         // the seeds that take the other branch would be patched
         auto &seeds = it->second;
@@ -1446,12 +1458,12 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       if (!branchingPermitted(current)) {
         TimerStatIncrementer timer(stats::forkTime);
         if (theRNG.getBool()) {
-          writeDroppedBranchTest(current, 0, Expr::createIsZero(condition),
-                                 conditionHash);
+          writeDroppedBranchTest(current, falseEntry,
+                                 Expr::createIsZero(condition));
           addConstraint(current, condition);
           res = Solver::True;        
         } else {
-          writeDroppedBranchTest(current, 1, condition, conditionHash);
+          writeDroppedBranchTest(current, trueEntry, condition);
           addConstraint(current, Expr::createIsZero(condition));
           res = Solver::False;
         }
@@ -1507,7 +1519,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       }
     }
 
-    if (symbolic && !decide(current, 1, conditionHash)) {
+    if (marked && !decide(current, trueEntry)) {
       pruneState(current);
       return StatePair(nullptr, nullptr);
     }
@@ -1519,7 +1531,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       }
     }
 
-    if (symbolic && !decide(current, 0, conditionHash)) {
+    if (marked && !decide(current, falseEntry)) {
       pruneState(current);
       return StatePair(nullptr, nullptr);
     }
@@ -1591,12 +1603,12 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
 
     addConstraint(*trueState, condition);
     addConstraint(*falseState, Expr::createIsZero(condition));
-    // (a replay that does not match the prefix paths is pruned)
-    if (!decide(*trueState, 1, conditionHash)) {
+    // (a state that does not follow the prefix paths is pruned)
+    if (marked && !decide(*trueState, trueEntry)) {
       pruneState(*trueState);
       trueState = nullptr;
     }
-    if (!decide(*falseState, 0, conditionHash)) {
+    if (marked && !decide(*falseState, falseEntry)) {
       pruneState(*falseState);
       falseState = nullptr;
     }
@@ -2777,7 +2789,8 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       ref<Expr> cond = eval(ki, 0, state).value;
 
       cond = optimizer.optimizeExpr(cond, false);
-      Executor::StatePair branches = fork(state, cond, false, BranchType::Conditional);
+      Executor::StatePair branches =
+          fork(state, cond, false, BranchType::Conditional, branchMark(bi));
 
       // NOTE: There is a hidden dependency here, markBranchVisited
       // requires that we still be in the context of the branch
@@ -2888,6 +2901,12 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       llvm::IntegerType *Ty = cast<IntegerType>(si->getCondition()->getType());
       ConstantInt *ci = ConstantInt::get(Ty, CE->getZExtValue());
       unsigned index = si->findCaseValue(ci)->getSuccessorIndex();
+      std::int64_t mark = branchMark(si);
+      if (mark >= 0 &&
+          !decide(state, pathEntry(mark, firstSuccessorIndex(si, si->getSuccessor(index))))) {
+        pruneState(state);
+        break;
+      }
       transferToBasicBlock(si->getSuccessor(index), si->getParent(), state);
     } else {
       // Handle possible different branch targets
@@ -2985,7 +3004,13 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
         conditions.push_back(branchTargets[*it]);
       }
       std::vector<ExecutionState*> branches;
-      branch(state, conditions, branches, BranchType::Switch);
+      std::int64_t mark = branchMark(si);
+      std::vector<std::uint64_t> entries;
+      if (mark >= 0)
+        for (BasicBlock *target : bbOrder)
+          entries.push_back(pathEntry(mark, firstSuccessorIndex(si, target)));
+      branch(state, conditions, branches, BranchType::Switch,
+             mark >= 0 ? &entries : nullptr);
 
       std::vector<ExecutionState*>::iterator bit = branches.begin();
       for (std::vector<BasicBlock *>::iterator it = bbOrder.begin(),
@@ -3152,7 +3177,7 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     const Cell &fCell = eval(ki, 2, state);
     // (not when recording the paths: the decision would depend on the
     // coverage, so the paths would depend on the order of the search)
-    if (CoverSelects && !recordDecisions && statsTracker &&
+    if (CoverSelects && !recordPaths && statsTracker &&
         state.stack.back().kf->trackCoverage &&
         !i->getOperand(0)->getType()->isVectorTy() &&
         !isa<ConstantExpr>(cond.getValue()) &&
@@ -4262,12 +4287,18 @@ void Executor::run(ExecutionState &initialState) {
   states.insert(&initialState);
 
   bool withPrefixPaths = !PrefixPaths.empty() || !SeededPrefixPaths.empty();
-  if (WriteUnfinishedPaths || withPrefixPaths)
-    recordDecisions = true;
+  if (WriteUnfinishedPaths || withPrefixPaths) {
+    if (pathWriter)
+      klee_error("-write-paths cannot be used with -write-unfinished-paths "
+                 "or -prefix-paths (both write the .path files of the tests)");
+    recordPaths = initialState.recordsPath = true;
+  }
   if (WriteUnfinishedPaths) {
-    unfinishedPathsFile =
-        interpreterHandler->openOutputFile("unfinished-paths.txt");
-    killedPathsFile = interpreterHandler->openOutputFile("killed-paths.txt");
+    unfinishedPathsFile = interpreterHandler->openOutputFile("unfinished.paths");
+    killedPathsFile = interpreterHandler->openOutputFile("killed.paths");
+    for (auto *f : {unfinishedPathsFile.get(), killedPathsFile.get()})
+      if (f)
+        *f << PathListMagic;
   }
   if (withPrefixPaths) {
     prefixPaths = std::make_unique<PrefixPathNode>();
@@ -4287,9 +4318,13 @@ void Executor::run(ExecutionState &initialState) {
       v.push_back(SeedInfo(*it));
   }
 
-  if (prefixPaths && !enterPrefixNode(initialState, prefixPaths.get())) {
-    klee_warning("the initial state does not continue any prefix path");
+  if (prefixPaths) {
     initialState.prefixNode = prefixPaths.get();
+    initialState.prefixPos = 0;
+    if (!reachedPrefixNode(initialState)) {
+      klee_warning("the initial state does not continue any prefix path");
+      initialState.prefixNode = prefixPaths.get();
+    }
   }
 
   if (usingSeeds) {
@@ -4436,54 +4471,100 @@ std::string Executor::getKValueInfo(ExecutionState &state,
   return info.str();
 }
 
+namespace {
+/// Reads the varints of a list of paths (see -write-unfinished-paths)
+class PathListReader {
+  std::string data;
+  std::size_t pos = 0;
+
+public:
+  explicit PathListReader(std::string data) : data(std::move(data)) {}
+
+  bool atEnd() const { return pos >= data.size(); }
+
+  bool read(std::uint32_t &v) {
+    std::uint64_t r = 0;
+    for (unsigned shift = 0; pos < data.size() && shift < 35; shift += 7) {
+      auto byte = static_cast<unsigned char>(data[pos++]);
+      r |= std::uint64_t(byte & 0x7f) << shift;
+      if (!(byte & 0x80)) {
+        v = static_cast<std::uint32_t>(r);
+        return r <= UINT32_MAX;
+      }
+    }
+    return false;
+  }
+
+  bool read(std::string &s, std::uint32_t len) {
+    if (data.size() - pos < len)
+      return false;
+    s = data.substr(pos, len);
+    pos += len;
+    return true;
+  }
+};
+} // namespace
+
 void Executor::loadPrefixPaths(const std::string &file, bool seeded) {
-  std::ifstream in(file);
+  std::ifstream in(file, std::ios::binary);
   if (!in)
     klee_error("unable to open the prefix paths: %s", file.c_str());
-  std::string line;
+  std::string data((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  if (data.compare(0, PathListMagic.size(), PathListMagic) != 0)
+    klee_error("not a list of paths: %s", file.c_str());
+  PathListReader reader(data.substr(PathListMagic.size()));
   std::size_t count = 0;
-  while (std::getline(in, line)) {
-    if (line.empty())
-      continue;
-    auto space = line.find(' ');
-    std::string id = line.substr(0, space);
-    std::string path = space == std::string::npos ? "" : line.substr(space + 1);
-    // (a path without a hash is not checked)
-    std::uint64_t hash = 0;
-    auto sharp = path.find('#');
-    if (sharp != std::string::npos) {
-      hash = std::stoull(path.substr(sharp + 1), nullptr, 16);
-      path.resize(sharp);
+  while (!reader.atEnd()) {
+    std::uint32_t len, n, id, dir;
+    std::string tag;
+    if (!reader.read(len) || !reader.read(tag, len) || !reader.read(n))
+      klee_error("malformed list of paths: %s", file.c_str());
+    std::vector<std::uint64_t> entries;
+    entries.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+      if (!reader.read(id) || !reader.read(dir))
+        klee_error("malformed list of paths: %s", file.c_str());
+      entries.push_back(pathEntry(id, dir));
     }
-    PrefixPathNode *node = prefixPaths.get();
-    for (std::size_t i = 0; i < path.size(); ++i) {
-      std::uint32_t decision;
-      if (path[i] == '(') {
-        auto end = path.find(')', i);
-        if (end == std::string::npos)
-          klee_error("malformed prefix path %s in %s", id.c_str(), file.c_str());
-        decision = std::stoul(path.substr(i + 1, end - i - 1));
-        i = end;
-      } else if (path[i] >= '0' && path[i] <= '9') {
-        decision = path[i] - '0';
-      } else {
-        klee_error("malformed prefix path %s in %s", id.c_str(), file.c_str());
-      }
-      auto &child = node->children[decision];
-      if (!child)
-        child = std::make_unique<PrefixPathNode>();
-      node = child.get();
-    }
-    if (sharp != std::string::npos) {
-      if (node->hasHash && node->hash != hash)
-        node->conflict = true;
-      node->hash = hash;
-      node->hasHash = true;
-    }
-    (seeded ? node->seededIds : node->ids).push_back(id);
+    addPrefixPath(entries, tag, seeded);
     ++count;
   }
   klee_message("using %zu %sprefix paths", count, seeded ? "seeded " : "");
+}
+
+void Executor::addPrefixPath(const std::vector<std::uint64_t> &entries,
+                             const std::string &id, bool seeded) {
+  PrefixPathNode *node = prefixPaths.get();
+  std::size_t i = 0;
+  while (i < entries.size()) {
+    auto &slot = node->children[entries[i]];
+    if (!slot) {
+      slot = std::make_unique<PrefixPathNode>();
+      slot->label.assign(entries.begin() + i, entries.end());
+      node = slot.get();
+      break;
+    }
+    PrefixPathNode *child = slot.get();
+    std::size_t j = 0;
+    while (j < child->label.size() && i < entries.size() &&
+           child->label[j] == entries[i]) {
+      ++j;
+      ++i;
+    }
+    if (j < child->label.size()) {
+      // split the label of the child at j
+      auto mid = std::make_unique<PrefixPathNode>();
+      mid->label.assign(child->label.begin(), child->label.begin() + j);
+      child->label.erase(child->label.begin(), child->label.begin() + j);
+      std::uint64_t first = child->label.front();
+      mid->children[first] = std::move(slot);
+      slot = std::move(mid);
+      child = slot.get();
+    }
+    node = child;
+  }
+  (seeded ? node->seededIds : node->ids).push_back(id);
 }
 
 void Executor::reportUsedPrefixPaths(const PrefixPathNode &node) {
@@ -4508,54 +4589,74 @@ void Executor::reportUsedPrefixPaths(const PrefixPathNode &node) {
     usedPrefixPathsFile->flush();
 }
 
-bool Executor::decide(ExecutionState &state, std::uint32_t decision,
-                      unsigned conditionHash) {
-  if (!recordDecisions)
-    return true;
-  state.decisions = std::make_shared<const PathDecision>(
-      std::move(state.decisions), decision, conditionHash);
-  if (!state.prefixNode)
-    return true;
-  auto it = state.prefixNode->children.find(decision);
-  assert(it != state.prefixNode->children.end() && "decision not allowed");
-  return enterPrefixNode(state, it->second.get());
+std::int64_t Executor::branchMark(const llvm::Instruction *i) const {
+  if (!recordPaths)
+    return -1;
+  static const unsigned kind = i->getContext().getMDKindID("bbk.branch");
+  const llvm::MDNode *md = i->getMetadata(kind);
+  if (!md || md->getNumOperands() != 1)
+    return -1;
+  auto *id = llvm::mdconst::dyn_extract<llvm::ConstantInt>(md->getOperand(0));
+  return id ? static_cast<std::int64_t>(id->getZExtValue()) : -1;
 }
 
-bool Executor::enterPrefixNode(ExecutionState &state,
-                               const PrefixPathNode *node) {
-  state.prefixNode = node;
+bool Executor::decide(ExecutionState &state, std::uint64_t entry) {
+  if (!recordPaths)
+    return true;
+  state.appendPath(entry);
+  const PrefixPathNode *node = state.prefixNode;
+  if (!node)
+    return true;
+  if (state.prefixPos < node->label.size()) {
+    if (node->label[state.prefixPos] != entry)
+      return false;
+    ++state.prefixPos;
+  } else {
+    auto it = node->children.find(entry);
+    if (it == node->children.end())
+      return false;
+    state.prefixNode = it->second.get();
+    state.prefixPos = 1;
+  }
+  if (state.prefixPos < state.prefixNode->label.size())
+    return true;
+  return reachedPrefixNode(state);
+}
+
+bool Executor::reachedPrefixNode(ExecutionState &state) {
+  const PrefixPathNode *node = state.prefixNode;
   bool end = !node->ids.empty() ||
              (!node->seededIds.empty() && seedMap.count(&state));
   if (!end)
     // (a state without seeds at the end of only seeded prefix paths)
     return !node->children.empty();
-  // the end of a prefix path: the replay took the same branches as the run
-  // that wrote the path if the hashes match (the prefix paths are replayed
-  // without the solver, so this is the check that the state is on the path)
-  if (node->conflict || (node->hasHash && node->hash != state.pathHash())) {
-    noteMisaligned();
-    return false;
-  }
   // the state explores all paths from here
   reportUsedPrefixPaths(*node);
   state.prefixNode = nullptr;
+  state.prefixPos = 0;
   return true;
 }
 
+void Executor::writePathRecord(llvm::raw_ostream &os,
+                               const ExecutionState &state,
+                               std::uint64_t entry) {
+  std::vector<std::uint64_t> entries = state.pathEntries();
+  if (entry != NoPathEntry)
+    entries.push_back(entry);
+  // an empty tag, the number of the entries and the entries (see
+  // loadPrefixPaths)
+  writePathVarint(os, 0);
+  writePathVarint(os, static_cast<std::uint32_t>(entries.size()));
+  writePathEntries(os, entries);
+}
+
 void Executor::writeUnfinishedPath(const ExecutionState &state,
-                                   std::int64_t decision,
-                                   unsigned conditionHash) {
+                                   std::uint64_t entry) {
   // (the prefix paths below a state that did not reach the end of one stay
-  // unfinished, its path was not checked, see enterPrefixNode)
+  // unfinished)
   if (!unfinishedPathsFile || state.prefixNode)
     return;
-  if (decision >= 0) {
-    PathDecision last(state.decisions, static_cast<std::uint32_t>(decision),
-                      conditionHash);
-    *unfinishedPathsFile << pathString(&last) << '\n';
-  } else {
-    *unfinishedPathsFile << state.pathString() << '\n';
-  }
+  writePathRecord(*unfinishedPathsFile, state, entry);
 }
 
 void Executor::pruneState(ExecutionState &state) {
@@ -4563,11 +4664,6 @@ void Executor::pruneState(ExecutionState &state) {
   removeState(state, StateTerminationType::Replay);
 }
 
-void Executor::noteMisaligned() {
-  if (misalignedPrefixPaths++ == 0)
-    klee_warning("a state does not replay a prefix path as the run that "
-                 "wrote it, pruning (misaligned replay)");
-}
 
 
 
@@ -4790,11 +4886,16 @@ void Executor::reportError(const llvm::Twine &message,
   state.claimCoverage();
 }
 
-void Executor::terminateStateOnExit(ExecutionState &state) {
+void Executor::terminateStateOnExit(ExecutionState &state, bool infiniteLoop) {
   if (terminateOnSolverFailure(&state))
     return;
   ++stats::terminationExit;
-  if ((CheckLeaks || CheckMemCleanup) && hasMemoryLeaks(state)) {
+  static bool infiniteLoopNoted = false;
+  if (infiniteLoop && !infiniteLoopNoted) {
+    klee_message("NOTE: a path reached an infinite loop (the path is complete)");
+    infiniteLoopNoted = true;
+  }
+  if (!infiniteLoop && (CheckLeaks || CheckMemCleanup) && hasMemoryLeaks(state)) {
     if (CheckMemCleanup) {
       auto leaks = getMemoryLeaks(state);
       assert(!leaks.empty() && "hasMemoryLeaks() bug");
@@ -4925,19 +5026,16 @@ static bool isIncompleteTermination(StateTerminationType reason) {
 }
 
 void Executor::writeDroppedBranchTest(const ExecutionState &state,
-                                      std::int64_t decision,
-                                      ref<Expr> condition,
-                                      unsigned conditionHash) {
+                                      std::uint64_t entry,
+                                      ref<Expr> condition) {
   if (haltedOnError)
     return;
-  writeUnfinishedPath(state, decision, conditionHash);
+  writeUnfinishedPath(state, entry);
   if (!WriteIncompleteTests)
     return;
   auto dropped = state.copy();
-  if (recordDecisions && decision >= 0)
-    dropped->decisions = std::make_shared<const PathDecision>(
-        dropped->decisions, static_cast<std::uint32_t>(decision),
-        conditionHash);
+  if (recordPaths && entry != NoPathEntry)
+    dropped->appendPath(entry);
   dropped->addConstraint(condition);
   interpreterHandler->processTestCase(
       *dropped, "Fork inhibited, the branch is not explored.\n",
@@ -5007,7 +5105,7 @@ void Executor::terminateStateOnError(ExecutionState &state,
       terminationType <= StateTerminationType::EXECERR) {
     // KLEE cannot continue the state, but a seeded state may (see
     // -seeded-prefix-paths)
-    *killedPathsFile << state.pathString() << '\n';
+    writePathRecord(*killedPathsFile, state);
     killedPathsFile->flush();
     message += " (killed path written)";
   }
@@ -6134,7 +6232,7 @@ Executor::executeAlloc(ExecutionState &state,
   // `state`.
   // (Not when recording the paths: the fork would be a decision that
   // depends on the seed, so the paths would depend on the seeds.)
-  if (!isa<ConstantExpr>(size) && !recordDecisions) {
+  if (!isa<ConstantExpr>(size) && !recordPaths) {
     if (ref<ConstantExpr> seedSize = getValueFromSeeds(state, size)) {
       ref<Expr> isSeedSize = EqExpr::create(size, seedSize);
       StatePair sizes = fork(state, isSeedSize, true, BranchType::Alloc);

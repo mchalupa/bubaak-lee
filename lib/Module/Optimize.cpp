@@ -140,6 +140,18 @@ void klee::optimizeModule(llvm::Module *M,
   runner.run(MPM, *M);
 }
 
+/// Does the module have branches marked for the paths (the metadata
+/// bbk.branch, see -write-unfinished-paths)?
+static bool hasMarkedBranches(const llvm::Module &module) {
+  unsigned kind = module.getContext().getMDKindID("bbk.branch");
+  for (const auto &f : module)
+    for (const auto &bb : f)
+      if (const auto *t = bb.getTerminator())
+        if (t->getMetadata(kind))
+          return true;
+  return false;
+}
+
 void klee::optimiseAndPrepare(bool OptimiseKLEECall, bool Optimize,
                               SwitchImplType SwitchType, std::string EntryPoint,
                               llvm::ArrayRef<const char *> preservedFunctions,
@@ -162,10 +174,14 @@ void klee::optimiseAndPrepare(bool OptimiseKLEECall, bool Optimize,
   // Finally, run the passes that maintain invariants we expect during
   // interpretation.  CFG simplification and (optionally) the LLVM switch
   // lowering are built-in passes run through the new PassManager.
+  // (Not the CFG simplification of a module with marked branches: it would
+  // merge them, but the paths are over the branches as marked, see
+  // -write-unfinished-paths; bubaak simplifies the CFG before marking.)
   {
     NewPMRunner runner(*module);
     FunctionPassManager FPM;
-    FPM.addPass(SimplifyCFGPass());
+    if (!hasMarkedBranches(*module))
+      FPM.addPass(SimplifyCFGPass());
     if (SwitchType == SwitchImplType::eSwitchTypeLLVM)
       FPM.addPass(llvm::LowerSwitchPass());
 
