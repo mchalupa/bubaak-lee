@@ -173,6 +173,33 @@ private:
   /// drive execution.
   const std::vector<struct KTest *> *usingSeeds;  
 
+  /// Record the paths of the states at the marked branches
+  /// (-write-unfinished-paths, -prefix-paths)
+  bool recordPaths = false;
+
+  /// The trie of the prefix paths (-prefix-paths)
+  std::unique_ptr<PrefixPathNode> prefixPaths;
+
+  /// The paths of the states that KLEE did not finish
+  /// (-write-unfinished-paths)
+  std::unique_ptr<llvm::raw_fd_ostream> unfinishedPathsFile;
+
+  /// The paths of the states killed by an execution error
+  /// (-write-unfinished-paths)
+  std::unique_ptr<llvm::raw_fd_ostream> killedPathsFile;
+
+  /// The prefix paths whose ends some states reached (-prefix-paths)
+  std::unique_ptr<llvm::raw_fd_ostream> usedPrefixPathsFile;
+
+  /// The number of states outside of the prefix paths
+  std::uint64_t prunedStates = 0;
+
+  /// The number of the prefix paths whose ends some states reached
+  std::uint64_t usedPrefixPaths = 0;
+
+  /// The paths of the states that are being dumped were written already
+  bool unfinishedPathsWritten = false;
+
   /// Disables forking, instead a random path is chosen. Enabled as
   /// needed to control memory usage. \see fork()
   bool atMemoryLimit;
@@ -443,14 +470,19 @@ private:
   /// a constraint and return the results. The input state is included
   /// as one of the results. Note that the output vector may include
   /// NULL pointers for states which were unable to be created.
+  /// With `entries`, the branch is a marked branch and the entries are those
+  /// of the conditions on the path (see decide).
   void branch(ExecutionState &state, const std::vector<ref<Expr>> &conditions,
-              std::vector<ExecutionState *> &result, BranchType reason);
+              std::vector<ExecutionState *> &result, BranchType reason,
+              const std::vector<std::uint64_t> *entries = nullptr);
 
   /// Fork current and return states in which condition holds / does
   /// not hold, respectively. One of the states is necessarily the
   /// current state, and one of the states may be null.
+  /// With `mark` (not negative), the branch is the marked branch of that ID
+  /// (the true side is the entry 0, the false side 1, see decide).
   StatePair fork(ExecutionState &current, ref<Expr> condition, bool isInternal,
-                 BranchType reason);
+                 BranchType reason, std::int64_t mark = -1);
 
   // If the MaxStatic*Pct limits have been reached, concretize the condition and
   // return it. Otherwise, return the unmodified condition.
@@ -543,9 +575,68 @@ private:
   /// used in the termination functions below.
   void terminateState(ExecutionState &state, StateTerminationType reason);
 
+  /// Remove the state like terminateState, but do not count it as an
+  /// explored path (it is outside of the prefix paths)
+  void pruneState(ExecutionState &state);
+
+  /// Remove state from queue and delete state (without counting it)
+  void removeState(ExecutionState &state, StateTerminationType reason);
+
+  /// Add the prefix paths from the file to the trie (-prefix-paths,
+  /// -seeded-prefix-paths if `seeded`)
+  void loadPrefixPaths(const std::string &file, bool seeded);
+
+  /// Add the prefix path with the id to the trie
+  void addPrefixPath(const std::vector<std::uint64_t> &entries,
+                     const std::string &id, bool seeded);
+
+  /// The state took all entries of the label of its prefix node: at the end
+  /// of a prefix path, the state is free (and the prefix paths below are
+  /// reported as used). False if the state must be pruned: it has no seeds
+  /// and only seeded prefix paths end here (and nothing continues)
+  bool reachedPrefixNode(ExecutionState &state);
+
+  /// May the state take the entry (it is free or a prefix path takes it)?
+  static bool prefixAllows(const ExecutionState &state, std::uint64_t entry) {
+    const PrefixPathNode *node = state.prefixNode;
+    if (!node)
+      return true;
+    if (state.prefixPos < node->label.size())
+      return node->label[state.prefixPos] == entry;
+    return node->children.count(entry);
+  }
+
+  /// The ID of the marked branch (the metadata `bbk.branch`), -1 if the
+  /// instruction is not one or the paths are not recorded
+  std::int64_t branchMark(const llvm::Instruction *i) const;
+
+  /// Append the entry to the path of the state; the state is free when it
+  /// reaches the end of a prefix path (the prefix paths below are reported
+  /// as used). False if the prefix paths do not take the entry or the state
+  /// cannot continue at their end (it must be pruned)
+  bool decide(ExecutionState &state, std::uint64_t entry);
+
+  /// Report the prefix paths of the subtree as used
+  void reportUsedPrefixPaths(const PrefixPathNode &node);
+
+  /// Write the path of the state (and the entry, if not NoPathEntry) to the
+  /// list of paths
+  void writePathRecord(llvm::raw_ostream &os, const ExecutionState &state,
+                       std::uint64_t entry = NoPathEntry);
+
+  /// Write the path of the state (and the entry, if not NoPathEntry) to the
+  /// unfinished paths (-write-unfinished-paths)
+  void writeUnfinishedPath(const ExecutionState &state,
+                           std::uint64_t entry = NoPathEntry);
+
+  /// No entry of a path (see pathEntry)
+  static constexpr std::uint64_t NoPathEntry = ~std::uint64_t(0);
+
   /// Call exit handler and terminate state normally
-  /// (end of execution path)
-  void terminateStateOnExit(ExecutionState &state);
+  /// (end of execution path); with `infiniteLoop`, the path reached
+  /// `__bbk_infinite_loop` (it would run forever there): a completed path
+  /// without the checks of the end of the program (leaks)
+  void terminateStateOnExit(ExecutionState &state, bool infiniteLoop = false);
 
   /// Call exit handler and terminate state early
   /// (e.g. due to state merging or memory pressure)
@@ -657,7 +748,9 @@ private:
 
   /// With -write-incomplete-tests, write a test for the branch (given by
   /// `condition`) that is not explored because forking is inhibited
-  void writeDroppedBranchTest(const ExecutionState &state,
+  /// (`entry` is the entry of the dropped branch on the path or
+  /// NoPathEntry, see decide)
+  void writeDroppedBranchTest(const ExecutionState &state, std::uint64_t entry,
                               ref<Expr> condition);
 
   /// Only for debug purposes; enable via debugger or klee-control

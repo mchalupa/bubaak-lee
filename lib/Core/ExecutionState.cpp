@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <iomanip>
 #include <map>
 #include <set>
@@ -119,10 +120,51 @@ ExecutionState::ExecutionState(const ExecutionState& state):
     newCoverage(state.newCoverage),
     forkDisabled(state.forkDisabled),
     overApproximation(state.overApproximation),
+    recordsPath(state.recordsPath),
+    asyncSeen(state.asyncSeen),
+    path(state.path),
+    prefixNode(state.prefixNode),
+    prefixPos(state.prefixPos),
     base_addrs(state.base_addrs),
     base_mos(state.base_mos) {
   for (const auto &cur_mergehandler: openMergeStack)
     cur_mergehandler->addOpenState(this);
+}
+
+void ExecutionState::appendPath(std::uint64_t entry) {
+  // (a chunk shared with another state or chunk does not change)
+  if (!path || path.use_count() > 1 || path->entries.size() >= 4096) {
+    auto chunk = std::make_shared<PathChunk>();
+    chunk->parent = std::move(path);
+    path = std::move(chunk);
+  }
+  path->entries.push_back(entry);
+}
+
+std::vector<std::uint64_t> ExecutionState::pathEntries() const {
+  std::vector<const PathChunk *> chunks;
+  for (const PathChunk *c = path.get(); c; c = c->parent.get())
+    chunks.push_back(c);
+  std::vector<std::uint64_t> entries;
+  for (auto it = chunks.rbegin(); it != chunks.rend(); ++it)
+    entries.insert(entries.end(), (*it)->entries.begin(), (*it)->entries.end());
+  return entries;
+}
+
+void klee::writePathVarint(llvm::raw_ostream &os, std::uint32_t v) {
+  while (v >= 0x80) {
+    os << static_cast<char>((v & 0x7f) | 0x80);
+    v >>= 7;
+  }
+  os << static_cast<char>(v);
+}
+
+void klee::writePathEntries(llvm::raw_ostream &os,
+                            const std::vector<std::uint64_t> &entries) {
+  for (std::uint64_t e : entries) {
+    writePathVarint(os, static_cast<std::uint32_t>(e >> 32));
+    writePathVarint(os, static_cast<std::uint32_t>(e));
+  }
 }
 
 ExecutionState *ExecutionState::branch() {

@@ -1027,6 +1027,13 @@ void KleeHandler::processTestCase(const ExecutionState &state,
       if (WriteKTests) {
         if (writeTestCaseKTest(assignments, test_id)) {
           atLeastOneGenerated = true;
+          if (state.recordsPath) {
+            // the path of the test (-write-unfinished-paths)
+            if (auto f = openTestFile("path", test_id)) {
+              *f << PathFileMagic;
+              writePathEntries(*f, state.pathEntries());
+            }
+          }
         }
       }
 
@@ -1528,6 +1535,8 @@ static const char *modelledExternals[] = {
   "klee_report_error",
   "klee_set_forking",
   "klee_silent_exit",
+  "__bbk_infinite_loop",
+  "__bbk_async",
   "klee_warning",
   "klee_warning_once",
   "klee_stack_trace",

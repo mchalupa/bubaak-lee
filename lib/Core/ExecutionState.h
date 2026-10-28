@@ -23,9 +23,12 @@
 #include "klee/Solver/Solver.h"
 #include "klee/System/Time.h"
 
+#include "llvm/Support/raw_ostream.h"
+
 #include <map>
 #include <memory>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace klee {
@@ -173,6 +176,60 @@ struct CleanupPhaseUnwindingInformation : public UnwindingInformation {
   static bool classof(const UnwindingInformation *u) {
     return u->getKind() == UnwindingInformation::Kind::CleanupPhase;
   }
+};
+
+/// @brief An entry of a path: the ID of a marked branch (the metadata
+/// `bbk.branch`, see closeprog/PathPass.cpp) and the index of the successor
+/// that the branch took (the first index of that block among the successors)
+inline std::uint64_t pathEntry(std::uint32_t id, std::uint32_t dir) {
+  return (std::uint64_t(id) << 32) | dir;
+}
+
+/// @brief A part of a path: the entries after those of the parent. The
+/// chunks are shared by the states, a state appends to its last chunk only
+/// if no other state or chunk refers to it.
+struct PathChunk {
+  mutable std::shared_ptr<const PathChunk> parent;
+  std::vector<std::uint64_t> entries;
+
+  ~PathChunk() {
+    // (no recursion on long paths)
+    auto p = std::move(parent);
+    while (p && p.use_count() == 1)
+      p = std::move(p->parent);
+  }
+};
+
+/// @brief The start of a .path file (the path of a test): the entries
+/// follow until the end of the file
+inline const std::string PathFileMagic("BBKP\x01", 5);
+
+/// @brief The start of a list of paths (unfinished.paths, killed.paths,
+/// -prefix-paths): the records `varint(len) TAG varint(n)` and n entries
+/// follow (TAG is the id of a prefix path, empty in the output of KLEE)
+inline const std::string PathListMagic("BBKR\x01", 5);
+
+/// @brief Write the number as a varint (LEB128)
+void writePathVarint(llvm::raw_ostream &os, std::uint32_t v);
+
+/// @brief Write the entries of a path in the format of the .path files (see
+/// -write-unfinished-paths): the varints `id dir` of the entries
+void writePathEntries(llvm::raw_ostream &os,
+                      const std::vector<std::uint64_t> &entries);
+
+/// @brief A node of the radix trie of prefix paths (see -prefix-paths)
+struct PrefixPathNode {
+  /// the entries of the path from the parent to this node (empty at the root)
+  std::vector<std::uint64_t> label;
+  /// the children by the first entry of their labels
+  std::map<std::uint64_t, std::unique_ptr<PrefixPathNode>> children;
+  /// the ids of the paths that end here
+  std::vector<std::string> ids;
+  /// the ids of the paths that end here and only seeded states continue
+  /// (see -seeded-prefix-paths)
+  std::vector<std::string> seededIds;
+  /// the paths of the subtree were reported as used
+  bool used = false;
 };
 
 /// @brief ExecutionState representing a path under exploration
@@ -339,6 +396,26 @@ public:
   /// may be infeasible, so its errors are not reported
   std::string overApproximation;
 
+  /// @brief Does the state record its path (-write-unfinished-paths,
+  /// -prefix-paths)? The path is empty at the start.
+  bool recordsPath = false;
+
+  /// @brief Did the path call __bbk_async (bbk-infinite-loops of bubaak: a
+  /// function that creates threads or handles signals)? Then the marked
+  /// loops do not end it (-kill-infinite-loops).
+  bool asyncSeen = false;
+
+  /// @brief The last chunk of the path (the marked branches the state took),
+  /// null if the path is empty
+  std::shared_ptr<PathChunk> path;
+
+  /// @brief With -prefix-paths, the node of the trie of prefix paths where
+  /// the state is (it took the first `prefixPos` entries of its label): the
+  /// state explores only the prefix paths until it reaches the end of one of
+  /// them (then it is null, the state is free)
+  const PrefixPathNode *prefixNode = nullptr;
+  std::uint32_t prefixPos = 0;
+
   /// @brief Mapping symbolic address expressions to concrete base addresses
   using base_addrs_t = std::map<ref<Expr>, ref<ConstantExpr>>;
   base_addrs_t base_addrs;
@@ -347,6 +424,12 @@ public:
   base_mo_t base_mos;
 
 public:
+  /// @brief Append the entry to the path
+  void appendPath(std::uint64_t entry);
+
+  /// @brief The entries of the path from the first one
+  std::vector<std::uint64_t> pathEntries() const;
+
 #ifdef KLEE_UNITTEST
   // provide this function only in the context of unittests
   ExecutionState() = default;

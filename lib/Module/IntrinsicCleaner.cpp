@@ -383,6 +383,16 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
         dirty = true;
         break;
       }
+#if LLVM_VERSION_CODE >= LLVM_VERSION(16, 0)
+      case Intrinsic::threadlocal_address: {
+        // KLEE has one instance of every thread-local global: the address of
+        // the instance of the current thread is the global itself
+        ii->replaceAllUsesWith(ii->getArgOperand(0));
+        ii->eraseFromParent();
+        dirty = true;
+        break;
+      }
+#endif
 
       // The following intrinsics are currently handled by LowerIntrinsicCall
       // (Invoking LowerIntrinsicCall with any intrinsics not on this
