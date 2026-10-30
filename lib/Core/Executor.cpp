@@ -205,6 +205,16 @@ cl::opt<std::string> SeededPrefixPaths(
              "unsupported call, see killed.paths)"),
     cl::cat(SeedingCat));
 
+cl::opt<std::string> DonePaths(
+    "done-paths",
+    cl::desc("The paths in the file (a list of paths, see "
+             "-write-unfinished-paths) were explored already, e.g., by a "
+             "fuzzer: a state that takes the last branch of such a path (and "
+             "no other path in the file continues it) ends silently, without "
+             "a test (the rest of the path has no marked branches). The "
+             "paths must be complete (they end where the program ends)"),
+    cl::cat(SeedingCat));
+
 cl::opt<unsigned> MaxDumpedStates(
     "max-dumped-states",
     cl::init(0),
@@ -1371,10 +1381,38 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       haltLimited = true;
     }
   }
-  solver->setTimeout(timeout);
-  bool success = solver->evaluate(current.constraints, condition, res,
-                                  current.queryMetaData);
-  solver->setTimeout(coreSolverTimeout);
+  // a seeded state on a prefix: seeds that take the sides of the marked
+  // branch that the prefix takes show that they are feasible (the seeds
+  // satisfy the constraints, addConstraint patches them), the query is not
+  // needed (it may be the query that failed before, see solver.paths)
+  bool seededSide = false;
+  if (isSeeding && mark >= 0 && recordPaths && current.prefixNode) {
+    bool trueAllowed = prefixAllows(current, pathEntry(mark, 0));
+    bool falseAllowed = prefixAllows(current, pathEntry(mark, 1));
+    bool trueSeeded = false, falseSeeded = false;
+    if (trueAllowed || falseAllowed) {
+      for (auto &si : it->second) {
+        ref<Expr> value = si.assignment.evaluate(condition);
+        if (auto *ce = dyn_cast<ConstantExpr>(value))
+          (ce->isTrue() ? trueSeeded : falseSeeded) = true;
+        if ((trueSeeded || !trueAllowed) && (falseSeeded || !falseAllowed))
+          break;
+      }
+    }
+    if (trueAllowed && falseAllowed)
+      seededSide = trueSeeded && falseSeeded;
+    else
+      seededSide = (trueAllowed && trueSeeded) || (falseAllowed && falseSeeded);
+  }
+  bool success = true;
+  if (seededSide) {
+    res = Solver::Unknown;
+  } else {
+    solver->setTimeout(timeout);
+    success = solver->evaluate(current.constraints, condition, res,
+                               current.queryMetaData);
+    solver->setTimeout(coreSolverTimeout);
+  }
   if (!success) {
     current.pc = current.prevPC;
     if (haltLimited) {
@@ -1749,6 +1787,16 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
   else
     klee_warning_once(reason.c_str(), "%s", os.str().c_str());
 
+
+  // the subtree of the state is not explored precisely from here: another
+  // run may continue from the path (seeded, see -seeded-prefix-paths)
+  if (droppedPathsFile && !haltedOnError && !state.prefixNode &&
+      !(state.droppedWritten && state.droppedPath == state.path)) {
+    writePathRecord(*droppedPathsFile, state);
+    droppedPathsFile->flush();
+    state.droppedPath = state.path;
+    state.droppedWritten = true;
+  }
 
   // dump the path of the state so that another tool can continue from the
   // state precisely (the state goes on with the concretized value)
@@ -3175,20 +3223,32 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     KValue cond = eval(ki, 0, state);
     const Cell &tCell = eval(ki, 1, state);
     const Cell &fCell = eval(ki, 2, state);
-    // (not when recording the paths: the decision would depend on the
-    // coverage, so the paths would depend on the order of the search)
-    if (CoverSelects && !recordPaths && statsTracker &&
-        state.stack.back().kf->trackCoverage &&
-        !i->getOperand(0)->getType()->isVectorTy() &&
+    // (when recording the paths, only at the marked selects: a fork is an
+    // entry of the path, a select that does not fork is not on the path; on
+    // a prefix path, a select forks iff the prefix paths take it, so that
+    // the replay does not depend on the coverage)
+    std::int64_t mark = branchMark(i);
+    bool forks = false;
+    if (!i->getOperand(0)->getType()->isVectorTy() &&
         !isa<ConstantExpr>(cond.getValue()) &&
-        !statsTracker->isBranchFullyVisited()) {
+        (!recordPaths || mark >= 0)) {
+      if (recordPaths && state.prefixNode)
+        forks = prefixAllows(state, pathEntry(mark, 0)) ||
+                prefixAllows(state, pathEntry(mark, 1));
+      else
+        forks = CoverSelects && statsTracker &&
+                state.stack.back().kf->trackCoverage &&
+                !statsTracker->isBranchFullyVisited();
+    }
+    if (forks) {
       // a side of the select is not covered yet (it may be a branch folded
       // into a select): the sides get separate states (see markBranchVisited
       // for the hidden dependency on the statistic id of the instruction)
       KValue tValue = tCell, fValue = fCell;
       ref<Expr> c = optimizer.optimizeExpr(cond.getValue(), false);
-      StatePair sides = fork(state, c, false, BranchType::Conditional);
-      statsTracker->markBranchVisited(sides.first, sides.second);
+      StatePair sides = fork(state, c, false, BranchType::Conditional, mark);
+      if (statsTracker)
+        statsTracker->markBranchVisited(sides.first, sides.second);
       if (sides.first)
         bindLocal(ki, *sides.first, tValue);
       if (sides.second)
@@ -4212,7 +4272,10 @@ void Executor::doDumpStates() {
     pruneState(*state);
   if (prefixPaths)
     klee_message("pruned %lu states outside of the prefix paths",
-                 (unsigned long)prunedStates);
+                 (unsigned long)(prunedStates - doneStates));
+  if (donePaths)
+    klee_message("%lu states ended on done paths",
+                 (unsigned long)doneStates);
 
   // the paths of all states first (it is fast), then the tests
   if (unfinishedPathsFile) {
@@ -4287,7 +4350,7 @@ void Executor::run(ExecutionState &initialState) {
   states.insert(&initialState);
 
   bool withPrefixPaths = !PrefixPaths.empty() || !SeededPrefixPaths.empty();
-  if (WriteUnfinishedPaths || withPrefixPaths) {
+  if (WriteUnfinishedPaths || withPrefixPaths || !DonePaths.empty()) {
     if (pathWriter)
       klee_error("-write-paths cannot be used with -write-unfinished-paths "
                  "or -prefix-paths (both write the .path files of the tests)");
@@ -4296,18 +4359,30 @@ void Executor::run(ExecutionState &initialState) {
   if (WriteUnfinishedPaths) {
     unfinishedPathsFile = interpreterHandler->openOutputFile("unfinished.paths");
     killedPathsFile = interpreterHandler->openOutputFile("killed.paths");
-    for (auto *f : {unfinishedPathsFile.get(), killedPathsFile.get()})
+    droppedPathsFile = interpreterHandler->openOutputFile("dropped.paths");
+    solverPathsFile = interpreterHandler->openOutputFile("solver.paths");
+    for (auto *f : {unfinishedPathsFile.get(), killedPathsFile.get(),
+                    droppedPathsFile.get(), solverPathsFile.get()})
       if (f)
         *f << PathListMagic;
   }
   if (withPrefixPaths) {
     prefixPaths = std::make_unique<PrefixPathNode>();
     if (!PrefixPaths.empty())
-      loadPrefixPaths(PrefixPaths, false);
+      klee_message("using %zu prefix paths",
+                   loadPrefixPaths(*prefixPaths, PrefixPaths, false));
     if (!SeededPrefixPaths.empty())
-      loadPrefixPaths(SeededPrefixPaths, true);
+      klee_message("using %zu seeded prefix paths",
+                   loadPrefixPaths(*prefixPaths, SeededPrefixPaths, true));
     usedPrefixPathsFile =
         interpreterHandler->openOutputFile("used-prefix-paths.txt");
+  }
+  if (!DonePaths.empty()) {
+    donePaths = std::make_unique<PrefixPathNode>();
+    klee_message("using %zu done paths",
+                 loadPrefixPaths(*donePaths, DonePaths, false));
+    initialState.doneNode = donePaths.get();
+    initialState.donePos = 0;
   }
 
   if (usingSeeds) {
@@ -4505,7 +4580,8 @@ public:
 };
 } // namespace
 
-void Executor::loadPrefixPaths(const std::string &file, bool seeded) {
+std::size_t Executor::loadPrefixPaths(PrefixPathNode &root,
+                                     const std::string &file, bool seeded) {
   std::ifstream in(file, std::ios::binary);
   if (!in)
     klee_error("unable to open the prefix paths: %s", file.c_str());
@@ -4527,15 +4603,16 @@ void Executor::loadPrefixPaths(const std::string &file, bool seeded) {
         klee_error("malformed list of paths: %s", file.c_str());
       entries.push_back(pathEntry(id, dir));
     }
-    addPrefixPath(entries, tag, seeded);
+    addPrefixPath(root, entries, tag, seeded);
     ++count;
   }
-  klee_message("using %zu %sprefix paths", count, seeded ? "seeded " : "");
+  return count;
 }
 
-void Executor::addPrefixPath(const std::vector<std::uint64_t> &entries,
+void Executor::addPrefixPath(PrefixPathNode &root,
+                             const std::vector<std::uint64_t> &entries,
                              const std::string &id, bool seeded) {
-  PrefixPathNode *node = prefixPaths.get();
+  PrefixPathNode *node = &root;
   std::size_t i = 0;
   while (i < entries.size()) {
     auto &slot = node->children[entries[i]];
@@ -4592,8 +4669,10 @@ void Executor::reportUsedPrefixPaths(const PrefixPathNode &node) {
 std::int64_t Executor::branchMark(const llvm::Instruction *i) const {
   if (!recordPaths)
     return -1;
-  static const unsigned kind = i->getContext().getMDKindID("bbk.branch");
-  const llvm::MDNode *md = i->getMetadata(kind);
+  static const unsigned branchKind = i->getContext().getMDKindID("bbk.branch");
+  static const unsigned selectKind = i->getContext().getMDKindID("bbk.select");
+  const llvm::MDNode *md =
+      i->getMetadata(isa<SelectInst>(i) ? selectKind : branchKind);
   if (!md || md->getNumOperands() != 1)
     return -1;
   auto *id = llvm::mdconst::dyn_extract<llvm::ConstantInt>(md->getOperand(0));
@@ -4605,22 +4684,54 @@ bool Executor::decide(ExecutionState &state, std::uint64_t entry) {
     return true;
   state.appendPath(entry);
   const PrefixPathNode *node = state.prefixNode;
+  if (node) {
+    if (state.prefixPos < node->label.size()) {
+      if (node->label[state.prefixPos] != entry)
+        return false;
+      ++state.prefixPos;
+    } else {
+      auto it = node->children.find(entry);
+      if (it == node->children.end())
+        return false;
+      state.prefixNode = it->second.get();
+      state.prefixPos = 1;
+    }
+    if (state.prefixPos == state.prefixNode->label.size() &&
+        !reachedPrefixNode(state))
+      return false;
+  }
+  // (after the prefix paths: a state at the end of a prefix path reports it
+  // as used even if it ends here)
+  return followDonePaths(state, entry);
+}
+
+bool Executor::followDonePaths(ExecutionState &state, std::uint64_t entry) {
+  const PrefixPathNode *node = state.doneNode;
   if (!node)
     return true;
-  if (state.prefixPos < node->label.size()) {
-    if (node->label[state.prefixPos] != entry)
-      return false;
-    ++state.prefixPos;
+  if (state.donePos < node->label.size()) {
+    if (node->label[state.donePos] != entry) {
+      state.doneNode = nullptr;
+      return true;
+    }
+    ++state.donePos;
   } else {
     auto it = node->children.find(entry);
-    if (it == node->children.end())
-      return false;
-    state.prefixNode = it->second.get();
-    state.prefixPos = 1;
+    if (it == node->children.end()) {
+      state.doneNode = nullptr;
+      return true;
+    }
+    state.doneNode = node = it->second.get();
+    state.donePos = 1;
   }
-  if (state.prefixPos < state.prefixNode->label.size())
+  node = state.doneNode;
+  if (state.donePos < node->label.size() || node->ids.empty() ||
+      !node->children.empty())
     return true;
-  return reachedPrefixNode(state);
+  if (doneStates++ == 0)
+    klee_message("NOTE: a state reached the end of a done path (it ends "
+                 "silently)");
+  return false;
 }
 
 bool Executor::reachedPrefixNode(ExecutionState &state) {
@@ -5108,6 +5219,13 @@ void Executor::terminateStateOnError(ExecutionState &state,
     writePathRecord(*killedPathsFile, state);
     killedPathsFile->flush();
     message += " (killed path written)";
+  } else if (solverPathsFile && !haltedOnError && !state.prefixNode &&
+             terminationType == StateTerminationType::Solver) {
+    // the other tools may continue the state (KLEE continues the paths
+    // that they extend, seeded, see the seeded branches in fork)
+    writePathRecord(*solverPathsFile, state);
+    solverPathsFile->flush();
+    message += " (solver path written)";
   }
 
   bool notemitted = emittedErrors.insert(std::make_pair(lastInst, message)).second;

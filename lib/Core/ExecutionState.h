@@ -416,6 +416,17 @@ public:
   const PrefixPathNode *prefixNode = nullptr;
   std::uint32_t prefixPos = 0;
 
+  /// @brief With -done-paths, the node of the trie of the done paths where
+  /// the state is (as `prefixNode`), null once it took a branch that no done
+  /// path takes
+  const PrefixPathNode *doneNode = nullptr;
+  std::uint32_t donePos = 0;
+
+  /// @brief The path when the state last wrote its path to dropped.paths
+  /// (the concretizations on the same path are written once)
+  std::shared_ptr<PathChunk> droppedPath;
+  bool droppedWritten = false;
+
   /// @brief Mapping symbolic address expressions to concrete base addresses
   using base_addrs_t = std::map<ref<Expr>, ref<ConstantExpr>>;
   base_addrs_t base_addrs;

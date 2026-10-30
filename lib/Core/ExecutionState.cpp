@@ -125,6 +125,10 @@ ExecutionState::ExecutionState(const ExecutionState& state):
     path(state.path),
     prefixNode(state.prefixNode),
     prefixPos(state.prefixPos),
+    doneNode(state.doneNode),
+    donePos(state.donePos),
+    droppedPath(state.droppedPath),
+    droppedWritten(state.droppedWritten),
     base_addrs(state.base_addrs),
     base_mos(state.base_mos) {
   for (const auto &cur_mergehandler: openMergeStack)

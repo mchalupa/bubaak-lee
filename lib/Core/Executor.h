@@ -180,6 +180,16 @@ private:
   /// The trie of the prefix paths (-prefix-paths)
   std::unique_ptr<PrefixPathNode> prefixPaths;
 
+  /// The trie of the done paths (-done-paths)
+  std::unique_ptr<PrefixPathNode> donePaths;
+
+  /// The number of the states that ended on a done path (-done-paths)
+  std::uint64_t doneStates = 0;
+
+  /// The paths of the states with a concretized value
+  /// (-write-unfinished-paths)
+  std::unique_ptr<llvm::raw_fd_ostream> droppedPathsFile;
+
   /// The paths of the states that KLEE did not finish
   /// (-write-unfinished-paths)
   std::unique_ptr<llvm::raw_fd_ostream> unfinishedPathsFile;
@@ -187,6 +197,10 @@ private:
   /// The paths of the states killed by an execution error
   /// (-write-unfinished-paths)
   std::unique_ptr<llvm::raw_fd_ostream> killedPathsFile;
+
+  /// The paths of the states killed by a failed or timed out query
+  /// (-write-unfinished-paths)
+  std::unique_ptr<llvm::raw_fd_ostream> solverPathsFile;
 
   /// The prefix paths whose ends some states reached (-prefix-paths)
   std::unique_ptr<llvm::raw_fd_ostream> usedPrefixPathsFile;
@@ -582,13 +596,20 @@ private:
   /// Remove state from queue and delete state (without counting it)
   void removeState(ExecutionState &state, StateTerminationType reason);
 
-  /// Add the prefix paths from the file to the trie (-prefix-paths,
-  /// -seeded-prefix-paths if `seeded`)
-  void loadPrefixPaths(const std::string &file, bool seeded);
+  /// Add the paths from the file to the trie `root` (-prefix-paths,
+  /// -seeded-prefix-paths if `seeded`, -done-paths), return their number
+  std::size_t loadPrefixPaths(PrefixPathNode &root, const std::string &file,
+                              bool seeded);
 
-  /// Add the prefix path with the id to the trie
-  void addPrefixPath(const std::vector<std::uint64_t> &entries,
-                     const std::string &id, bool seeded);
+  /// Add the path with the id to the trie `root`
+  static void addPrefixPath(PrefixPathNode &root,
+                            const std::vector<std::uint64_t> &entries,
+                            const std::string &id, bool seeded);
+
+  /// Move the state along the done paths by the entry (-done-paths). False
+  /// if the state reached the end of a done path that nothing continues:
+  /// the path was explored (e.g., by a fuzzer), the state ends silently
+  bool followDonePaths(ExecutionState &state, std::uint64_t entry);
 
   /// The state took all entries of the label of its prefix node: at the end
   /// of a prefix path, the state is free (and the prefix paths below are

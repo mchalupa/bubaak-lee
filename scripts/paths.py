@@ -5,6 +5,7 @@ Paths over the marked branches (see -write-unfinished-paths), for the tests:
   paths.py mark FILE.ll   print the module with the conditional branches
                           marked (!bbk.branch, numbered from 0 in the order
                           of the file; bubaak marks them by its LLVM pass)
+                          and the selects (!bbk.select, numbered after them)
   paths.py show FILE...   print .path files (`ID:DIR ...`) or lists of
                           paths (`TAG ID:DIR ...` per path)
   paths.py list           read lines `TAG ID:DIR ...` and write a list of
@@ -39,15 +40,21 @@ def read_varints(data):
 
 
 def mark(path):
-    n = 0
     with open(path) as f:
-        for line in f:
-            line = line.rstrip("\n")
-            m = re.match(r"\s*br i1 .*, label (%[^,\s]+), label (%[^,\s]+)", line)
-            if m:
-                line = line[: m.end()] + f", !bbk.branch !{{i32 {n}}}" + line[m.end() :]
-                n += 1
-            print(line)
+        lines = [line.rstrip("\n") for line in f]
+    n = 0
+    for i, line in enumerate(lines):
+        m = re.match(r"\s*br i1 .*, label (%[^,\s]+), label (%[^,\s]+)", line)
+        if m:
+            lines[i] = line[: m.end()] + f", !bbk.branch !{{i32 {n}}}" + line[m.end() :]
+            n += 1
+    # (the selects get the IDs after the branches, as in bubaak)
+    for i, line in enumerate(lines):
+        m = re.match(r"\s*%\S+ = select i1 [^,]+, [^,]+, [^,]+?(?=, !|$)", line)
+        if m:
+            lines[i] = line[: m.end()] + f", !bbk.select !{{i32 {n}}}" + line[m.end() :]
+            n += 1
+    print("\n".join(lines))
 
 
 def entries(vals):
