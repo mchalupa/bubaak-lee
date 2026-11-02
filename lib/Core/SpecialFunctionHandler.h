@@ -14,6 +14,7 @@
 #include "klee/Module/Cell.h"
 
 #include <map>
+#include <optional>
 #include <vector>
 #include <string>
 
@@ -84,6 +85,42 @@ namespace klee {
                           unsigned size, bool isSigned,
                           const std::string &name, bool isPointer);
 
+    /// With -alloc-may-fail, the allocation of the call (target) may fail:
+    /// the state forks on a new input __bbk_alloc_fail (see AllocFailInput),
+    /// the call returns NULL in the state in which it fails. Returns the
+    /// state in which the allocation succeeds (null if there is none); the
+    /// state itself without -alloc-may-fail.
+    ExecutionState *forkAllocFailure(ExecutionState &state,
+                                     KInstruction *target);
+    /// forkAllocFailure where the failed call returns `failResult`
+    ExecutionState *forkAllocFailure(ExecutionState &state,
+                                     KInstruction *target,
+                                     const KValue &failResult);
+
+    /// Does the allocation call take a decision __bbk_alloc_fail? The calls
+    /// from the program do, and the allocation of strdup and strndup of the
+    /// libc called from the program (the decision of that call); the other
+    /// allocations inside the libc (and KLEE's runtime) do not
+    bool takesAllocDecision(const ExecutionState &state,
+                            const KInstruction *target);
+
+    /// With `overflows` (not null: the size overflows), the call returns
+    /// `failResult` if the size overflows. Returns the state in
+    /// which it does not (null if none)
+    ExecutionState *forkSizeOverflow(ExecutionState &state,
+                                     KInstruction *target,
+                                     ref<Expr> overflows,
+                                     const KValue &failResult);
+
+    /// realloc(address, size) (with `overflows`, the size overflowed: the
+    /// call fails)
+    void executeRealloc(ExecutionState &state, KInstruction *target,
+                        const KValue &address, ref<Expr> size,
+                        ref<Expr> overflows);
+
+    std::optional<uint64_t> getAlignment(ExecutionState &state,
+                                         const KValue &arg, const char *fun);
+
     void putConcreteValue(ExecutionState& state,
                           const std::string& name, bool isSigned,
                           KInstruction *target,
@@ -128,6 +165,9 @@ namespace klee {
     HANDLER(handlePrintRange);
     HANDLER(handleRange);
     HANDLER(handleRealloc);
+    HANDLER(handleReallocarray);
+    HANDLER(handlePosixMemalign);
+    HANDLER(handleValloc);
     HANDLER(handleReportError);
     HANDLER(handleRevirtObjects);
     HANDLER(handleSetForking);

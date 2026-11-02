@@ -20,6 +20,7 @@
 #include "StatsTracker.h"
 #include "TimingSolver.h"
 
+#include "klee/ADT/KTest.h"
 #include "klee/Config/config.h"
 #include "klee/Module/KInstruction.h"
 #include "klee/Module/KModule.h"
@@ -80,6 +81,15 @@ cl::opt<bool>
     SymbolicMallocs("malloc-symbolic-contents", cl::init(false),
                      cl::desc("Make malloc'ed memory symbolic "
                               "(default=false)"));
+
+cl::opt<bool> AllocMayFail(
+    "alloc-may-fail", cl::init(false),
+    cl::desc("Every call of malloc, calloc, realloc, aligned_alloc and "
+             "memalign may fail (return NULL; realloc keeps the old object). "
+             "The choice is a 1-byte input __bbk_alloc_fail per call (nonzero "
+             "= the call fails), a failed call is the entry (4294967295, 0) "
+             "of the path of the marked branches. Stack allocations (alloca) "
+             "and operator new never fail (default=false)"));
 
 } // namespace
 
@@ -151,6 +161,9 @@ static constexpr std::array handlerInfo = {
   add("malloc", handleMalloc, true),
   add("memalign", handleMemalign, true),
   add("realloc", handleRealloc, true),
+  add("reallocarray", handleReallocarray, true),
+  add("posix_memalign", handlePosixMemalign, true),
+  add("valloc", handleValloc, true),
   add("__VERIFIER_scope_enter", handleScopeEnter, false),
   add("__VERIFIER_scope_leave", handleScopeLeave, false),
   // SV-COMP special functions. We could define them using
@@ -499,16 +512,139 @@ void SpecialFunctionHandler::handleDeleteArray(ExecutionState &state,
   executor.executeFree(state, arguments[0]);
 }
 
+// The libc functions that are allocations that may fail themselves (their
+// allocation called from them takes the decision of their call)
+static bool isAllocatingLibcFunction(llvm::StringRef name) {
+  return name == "strdup" || name == "strndup";
+}
+
+bool SpecialFunctionHandler::takesAllocDecision(const ExecutionState &state,
+                                                const KInstruction *target) {
+  const auto &internal = executor.kmodule->internalFunctions;
+  const llvm::Function *caller = target->inst->getFunction();
+  // called from the program
+  if (!internal.count(caller))
+    return true;
+  // the allocation of strdup or strndup of the libc called from the program
+  // (the function of the top frame is the caller of the allocation, the
+  // handlers do not push frames)
+  if (isAllocatingLibcFunction(caller->getName()) && !state.stack.empty()) {
+    const KInstruction *call = state.stack.back().caller;
+    if (call && !internal.count(call->inst->getFunction()))
+      return true;
+  }
+  // an allocation inside the libc (or other runtime functions)
+  return false;
+}
+
+ExecutionState *
+SpecialFunctionHandler::forkAllocFailure(ExecutionState &state,
+                                         KInstruction *target) {
+  return forkAllocFailure(state, target, KValue(Expr::createPointer(0)));
+}
+
+ExecutionState *
+SpecialFunctionHandler::forkAllocFailure(ExecutionState &state,
+                                         KInstruction *target,
+                                         const KValue &failResult) {
+  if (!AllocMayFail || !takesAllocDecision(state, target))
+    return &state;
+  // the input of the call (a seeded or replayed value, or a new symbolic one)
+  ref<Expr> input;
+  if (const KTest *replay = executor.replayKTest) {
+    // -replay-ktest-file: the next object of the test if it is the decision
+    // of an allocation, otherwise the allocation succeeds (e.g., a test of a
+    // run that does not model the failures)
+    unsigned char value = 0;
+    if (executor.replayPosition < replay->numObjects) {
+      const KTestObject &obj = replay->objects[executor.replayPosition];
+      if (obj.name == AllocFailInput && obj.numBytes == 1) {
+        value = obj.bytes[0];
+        ++executor.replayPosition;
+      }
+    }
+    input = ConstantExpr::alloc(value, Expr::Int8);
+    putConcreteValue(state, AllocFailInput, false, target, input);
+  } else {
+    input = getNondetValue(state, target, 8, false, AllocFailInput, false)
+                .getValue();
+  }
+  ref<Expr> fails = Expr::createIsZero(Expr::createIsZero(input));
+  // the failed call is an entry of the path, the successful one is not (see
+  // AllocFailPathId)
+  std::uint64_t failEntry = executor.recordPaths
+                                ? pathEntry(AllocFailPathId, 0)
+                                : Executor::NoPathEntry;
+  Executor::StatePair sides = executor.forkWithEntries(
+      state, fails, /*isInternal=*/false, BranchType::Alloc, failEntry,
+      Executor::NoPathEntry);
+  if (sides.first)
+    executor.bindLocal(target, *sides.first, failResult);
+  return sides.second;
+}
+
+// Does a * b overflow (the high half of the product in the double width is
+// not zero)?
+static ref<Expr> mulOverflows(ref<Expr> a, ref<Expr> b) {
+  Expr::Width w = a->getWidth();
+  ref<Expr> wide = MulExpr::create(ZExtExpr::create(a, 2 * w),
+                                   ZExtExpr::create(b, 2 * w));
+  return Expr::createIsZero(Expr::createIsZero(ExtractExpr::create(wide, w, w)));
+}
+
+ExecutionState *SpecialFunctionHandler::forkSizeOverflow(
+    ExecutionState &state, KInstruction *target, ref<Expr> overflows,
+    const KValue &failResult) {
+  if (!overflows)
+    return &state;
+  Executor::StatePair sides =
+      executor.fork(state, overflows, true, BranchType::Alloc);
+  if (sides.first)
+    executor.bindLocal(target, *sides.first, failResult);
+  return sides.second;
+}
+
 void SpecialFunctionHandler::handleMalloc(ExecutionState &state,
                                   KInstruction *target,
                                   const std::vector<Cell> &arguments) {
   // XXX should type check args
   assert(arguments.size()==1 && "invalid number of arguments to malloc");
-  auto *mo = executor.executeAlloc(state, arguments[0].value, false, target);
+  ExecutionState *succeeds = forkAllocFailure(state, target);
+  if (!succeeds)
+    return;
+  auto *mo =
+      executor.executeAlloc(*succeeds, arguments[0].value, false, target);
 
   if (SymbolicMallocs && mo) {
-    executor.executeMakeSymbolic(state, mo, "malloc"+std::to_string(mo->id));
+    executor.executeMakeSymbolic(*succeeds, mo,
+                                 "malloc" + std::to_string(mo->id));
   }
+}
+
+// The alignment of memalign & co. (the smallest one if it is symbolic), none
+// if the state was terminated
+std::optional<uint64_t> SpecialFunctionHandler::getAlignment(ExecutionState &state,
+                                              const KValue &arg,
+                                              const char *fun) {
+  if (!arg.getSegment()->isZero()) {
+    executor.terminateStateOnUserError(
+        state, std::string(fun) + ": alignment argument is not a number");
+    return std::nullopt;
+  }
+  auto alignmentRangeExpr = executor.solver->getRange(
+      state.constraints, arg.getValue(), state.queryMetaData);
+  auto alignmentConstExpr = dyn_cast<ConstantExpr>(alignmentRangeExpr.first);
+  if (!alignmentConstExpr) {
+    executor.terminateStateOnUserError(
+        state, "Could not determine size of symbolic alignment");
+    return std::nullopt;
+  }
+  // Warn, if the expression has more than one solution
+  if (alignmentRangeExpr.first != alignmentRangeExpr.second) {
+    klee_warning_once(
+        0, "Symbolic alignment for memalign. Choosing smallest alignment");
+  }
+  return alignmentConstExpr->getZExtValue();
 }
 
 void SpecialFunctionHandler::handleMemalign(ExecutionState &state,
@@ -520,39 +656,82 @@ void SpecialFunctionHandler::handleMemalign(ExecutionState &state,
     return;
   }
 
-  if (!arguments[0].getSegment()->isZero()) {
-    executor.terminateStateOnUserError(state,
-      "memalign: alignment argument is not a number");
-    return;
-  }
-
   if (!arguments[1].getSegment()->isZero()) {
     executor.terminateStateOnUserError(state,
       "memalign: size argument is not a number");
     return;
   }
 
-  auto alignmentRangeExpr =
-      executor.solver->getRange(state.constraints, arguments[0].getValue(),
-                                state.queryMetaData);
-  ref<Expr> alignmentExpr = alignmentRangeExpr.first;
-  auto alignmentConstExpr = dyn_cast<ConstantExpr>(alignmentExpr);
+  std::optional<uint64_t> alignment =
+      getAlignment(state, arguments[0], "memalign");
+  if (!alignment)
+    return;
 
-  if (!alignmentConstExpr) {
-    executor.terminateStateOnUserError(state, "Could not determine size of symbolic alignment");
+  ExecutionState *succeeds = forkAllocFailure(state, target);
+  if (!succeeds)
+    return;
+  executor.executeAlloc(*succeeds, arguments[1].getValue(), false, target,
+                        false, 0, *alignment);
+}
+
+// void *valloc(size_t size): memalign(page size, size)
+void SpecialFunctionHandler::handleValloc(ExecutionState &state,
+                                          KInstruction *target,
+                                          const std::vector<Cell> &arguments) {
+  if (arguments.size() != 1) {
+    executor.terminateStateOnUserError(
+        state, "Incorrect number of arguments to valloc(size_t size)");
     return;
   }
+  ExecutionState *succeeds = forkAllocFailure(state, target);
+  if (!succeeds)
+    return;
+  executor.executeAlloc(*succeeds, arguments[0].getValue(), false, target,
+                        false, 0, 4096);
+}
 
-  uint64_t alignment = alignmentConstExpr->getZExtValue();
-
-  // Warn, if the expression has more than one solution
-  if (alignmentRangeExpr.first != alignmentRangeExpr.second) {
-    klee_warning_once(
-        0, "Symbolic alignment for memalign. Choosing smallest alignment");
+// int posix_memalign(void **memptr, size_t alignment, size_t size): 0 and
+// the object in *memptr, or ENOMEM (a failed allocation) or EINVAL (a bad
+// alignment) and *memptr unchanged
+void SpecialFunctionHandler::handlePosixMemalign(
+    ExecutionState &state, KInstruction *target,
+    const std::vector<Cell> &arguments) {
+  if (arguments.size() != 3) {
+    executor.terminateStateOnUserError(
+        state, "Incorrect number of arguments to posix_memalign(void **, "
+               "size_t, size_t)");
+    return;
   }
-
-  executor.executeAlloc(state, arguments[1].getValue(), false, target, false, 0,
-                        alignment);
+  if (!arguments[2].getSegment()->isZero()) {
+    executor.terminateStateOnUserError(
+        state, "posix_memalign: size argument is not a number");
+    return;
+  }
+  Expr::Width width = executor.getWidthForLLVMType(target->inst->getType());
+  const KValue enomem(ConstantExpr::create(ENOMEM, width));
+  ExecutionState *succeeds = forkAllocFailure(state, target, enomem);
+  if (!succeeds)
+    return;
+  std::optional<uint64_t> alignment =
+      getAlignment(*succeeds, arguments[1], "posix_memalign");
+  if (!alignment)
+    return;
+  if (*alignment == 0 || (*alignment & (*alignment - 1)) != 0 ||
+      *alignment % (Context::get().getPointerWidth() / 8) != 0) {
+    executor.bindLocal(target, *succeeds,
+                       KValue(ConstantExpr::create(EINVAL, width)));
+    return;
+  }
+  // (executeAlloc binds the pointer to the call)
+  MemoryObject *mo = executor.executeAlloc(*succeeds, arguments[2].getValue(),
+                                           false, target, false, 0, *alignment);
+  if (!mo) {
+    executor.bindLocal(target, *succeeds, enomem);
+    return;
+  }
+  executor.bindLocal(target, *succeeds, KValue(ConstantExpr::create(0, width)));
+  executor.executeMemoryOperation(*succeeds, true, arguments[0],
+                                  mo->getPointer(), nullptr);
 }
 
 #ifdef SUPPORT_KLEE_EH_CXX
@@ -831,7 +1010,18 @@ void SpecialFunctionHandler::handleCalloc(ExecutionState &state,
 
   ref<Expr> size = MulExpr::create(arguments[0].value,
                                    arguments[1].value);
-  executor.executeAlloc(state, size, false, target, true);
+  ExecutionState *succeeds = forkAllocFailure(state, target);
+  if (!succeeds)
+    return;
+  if (AllocMayFail) {
+    // calloc fails if the size overflows
+    succeeds = forkSizeOverflow(
+        *succeeds, target, mulOverflows(arguments[0].value, arguments[1].value),
+        KValue(Expr::createPointer(0)));
+    if (!succeeds)
+      return;
+  }
+  executor.executeAlloc(*succeeds, size, false, target, true);
 }
 
 void SpecialFunctionHandler::handleRealloc(ExecutionState &state,
@@ -840,8 +1030,46 @@ void SpecialFunctionHandler::handleRealloc(ExecutionState &state,
   // XXX should type check args
   assert(arguments.size()==2 &&
          "invalid number of arguments to realloc");
-  const KValue &address = arguments[0];
-  ref<Expr> size = arguments[1].value;
+  executeRealloc(state, target, arguments[0], arguments[1].value, nullptr);
+}
+
+// void *reallocarray(void *ptr, size_t nmemb, size_t size): realloc(ptr,
+// nmemb * size), fails (returns NULL, ptr stays) if the product overflows;
+// the overflow is checked before the allocation decision (no decision is
+// taken then), as SlowBeast and the native runtime of bubaak do
+void SpecialFunctionHandler::handleReallocarray(
+    ExecutionState &state, KInstruction *target,
+    const std::vector<Cell> &arguments) {
+  if (arguments.size() != 3) {
+    executor.terminateStateOnUserError(
+        state, "Incorrect number of arguments to reallocarray(void *, "
+               "size_t, size_t)");
+    return;
+  }
+  ref<Expr> size = MulExpr::create(arguments[1].value, arguments[2].value);
+  ExecutionState *fits =
+      forkSizeOverflow(state, target,
+                       mulOverflows(arguments[1].value, arguments[2].value),
+                       KValue(Expr::createPointer(0)));
+  if (fits)
+    executeRealloc(*fits, target, arguments[0], size, nullptr);
+}
+
+void SpecialFunctionHandler::executeRealloc(ExecutionState &state,
+                                            KInstruction *target,
+                                            const KValue &address,
+                                            ref<Expr> size,
+                                            ref<Expr> overflows) {
+  const KValue null(Expr::createPointer(0));
+  // an allocation (that may fail) of the size of the call
+  auto allocate = [&](ExecutionState &s, const ObjectState *reallocFrom) {
+    ExecutionState *succeeds = forkAllocFailure(s, target);
+    if (succeeds)
+      succeeds = forkSizeOverflow(*succeeds, target, overflows, null);
+    if (succeeds)
+      executor.executeAlloc(*succeeds, size, false, target, false,
+                            reallocFrom);
+  };
 
   // If ptr is NULL, then the call is equivalent to malloc(size), for all
   // values of size; if size is equal to zero, and ptr is not NULL, then the
@@ -851,17 +1079,20 @@ void SpecialFunctionHandler::handleRealloc(ExecutionState &state,
       state, address.createIsZero(), true, BranchType::Realloc);
 
   if (zeroAddr.first) { // addr == NULL, behave like a 'malloc' was called
-    executor.executeAlloc(*zeroAddr.first, size, false, target);
+    allocate(*zeroAddr.first, nullptr);
   }
 
   if (!zeroAddr.second) {
     return;
   }
 
-  // addr != 0
-  Executor::StatePair zeroSize = executor.fork(*zeroAddr.second,
-                                               Expr::createIsZero(size),
-                                               true, BranchType::Realloc);
+  // addr != 0 (the size is zero if the product of reallocarray is zero, not
+  // only its low half)
+  ref<Expr> zero = Expr::createIsZero(size);
+  if (overflows)
+    zero = AndExpr::create(zero, Expr::createIsZero(overflows));
+  Executor::StatePair zeroSize =
+      executor.fork(*zeroAddr.second, zero, true, BranchType::Realloc);
 
   if (zeroSize.first) { // size == 0
     executor.executeFree(*zeroSize.first, address, target);
@@ -871,7 +1102,7 @@ void SpecialFunctionHandler::handleRealloc(ExecutionState &state,
         executor.fork(*zeroSize.second, address.createIsZero(), true,
                       BranchType::Realloc);
     if (zeroPointer.first) { // address == 0
-      executor.executeAlloc(*zeroPointer.first, size, false, target);
+      allocate(*zeroPointer.first, nullptr);
     } 
     if (zeroPointer.second) { // address != 0
       Executor::ExactResolutionList rl;
@@ -898,8 +1129,8 @@ void SpecialFunctionHandler::handleRealloc(ExecutionState &state,
                                          executor.getKValueInfo(
                                              *it->second, address));
         } else {
-          executor.executeAlloc(*it->second, size, false, target, false,
-                                it->first.second);
+          // (a failed realloc returns NULL, the object stays as it is)
+          allocate(*it->second, it->first.second);
         }
       }
     }
@@ -1158,9 +1389,11 @@ KValue SpecialFunctionHandler::getNondetValue(ExecutionState &state,
   auto& nondet = executor.replayNondet[position];
   //klee_warning("Matching %s:%u:%u", name.c_str(), info->line, info->column);
 
+  // (an input without a location, e.g., __bbk_alloc_fail, matches by name)
   if (std::get<0>(nondet) == name &&
-      std::get<1>(nondet) == info->line &&
-      std::get<2>(nondet) == info->column) {
+      ((std::get<1>(nondet) == info->line &&
+        std::get<2>(nondet) == info->column) ||
+       (std::get<1>(nondet) == 0 && std::get<2>(nondet) == 0))) {
       auto& val = std::get<3>(nondet);
 
      //klee_warning("Matched nondet value for: %s:%u:%u to %lu",

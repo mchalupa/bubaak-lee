@@ -1350,6 +1350,26 @@ ref<Expr> Executor::maxStaticPctChecks(ExecutionState &current,
 Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
                                    bool isInternal, BranchType reason,
                                    std::int64_t mark) {
+  // a marked branch, its sides are entries of the path
+  bool marked = mark >= 0 && recordPaths;
+  return forkWithEntries(current, condition, isInternal, reason,
+                         marked ? pathEntry(mark, 0) : NoPathEntry,
+                         marked ? pathEntry(mark, 1) : NoPathEntry);
+}
+
+Executor::StatePair
+Executor::forkWithEntries(ExecutionState &current, ref<Expr> condition,
+                          bool isInternal, BranchType reason,
+                          std::uint64_t trueEntry, std::uint64_t falseEntry) {
+  assert((recordPaths ||
+          (trueEntry == NoPathEntry && falseEntry == NoPathEntry)) &&
+         "entries of a path that is not recorded");
+  // a side of the fork is on the path
+  const bool onPath = trueEntry != NoPathEntry || falseEntry != NoPathEntry;
+  // may the state take the side (a side not on the path is always allowed)
+  auto allowed = [&](std::uint64_t entry) {
+    return entry == NoPathEntry || prefixAllows(current, entry);
+  };
   // (a value got after a failed query is not used for a branch)
   if (terminateOnSolverFailure(&current))
     return StatePair(nullptr, nullptr);
@@ -1386,9 +1406,9 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
   // satisfy the constraints, addConstraint patches them), the query is not
   // needed (it may be the query that failed before, see solver.paths)
   bool seededSide = false;
-  if (isSeeding && mark >= 0 && recordPaths && current.prefixNode) {
-    bool trueAllowed = prefixAllows(current, pathEntry(mark, 0));
-    bool falseAllowed = prefixAllows(current, pathEntry(mark, 1));
+  if (isSeeding && onPath && current.prefixNode) {
+    bool trueAllowed = allowed(trueEntry);
+    bool falseAllowed = allowed(falseEntry);
     bool trueSeeded = false, falseSeeded = false;
     if (trueAllowed || falseAllowed) {
       for (auto &si : it->second) {
@@ -1428,14 +1448,10 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
     return StatePair(nullptr, nullptr);
   }
 
-  // a marked branch, its sides are entries of the path
-  bool marked = mark >= 0 && recordPaths;
-  std::uint64_t trueEntry = marked ? pathEntry(mark, 0) : NoPathEntry;
-  std::uint64_t falseEntry = marked ? pathEntry(mark, 1) : NoPathEntry;
-  if (marked && current.prefixNode) {
+  if (onPath && current.prefixNode) {
     // follow only the prefix paths
-    bool trueAllowed = prefixAllows(current, trueEntry);
-    bool falseAllowed = prefixAllows(current, falseEntry);
+    bool trueAllowed = allowed(trueEntry);
+    bool falseAllowed = allowed(falseEntry);
     if ((!trueAllowed || res == Solver::False) &&
         (!falseAllowed || res == Solver::True)) {
       // (the prefix paths take another branch here)
@@ -1557,7 +1573,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       }
     }
 
-    if (marked && !decide(current, trueEntry)) {
+    if (trueEntry != NoPathEntry && !decide(current, trueEntry)) {
       pruneState(current);
       return StatePair(nullptr, nullptr);
     }
@@ -1569,7 +1585,7 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
       }
     }
 
-    if (marked && !decide(current, falseEntry)) {
+    if (falseEntry != NoPathEntry && !decide(current, falseEntry)) {
       pruneState(current);
       return StatePair(nullptr, nullptr);
     }
@@ -1642,11 +1658,11 @@ Executor::StatePair Executor::fork(ExecutionState &current, ref<Expr> condition,
     addConstraint(*trueState, condition);
     addConstraint(*falseState, Expr::createIsZero(condition));
     // (a state that does not follow the prefix paths is pruned)
-    if (marked && !decide(*trueState, trueEntry)) {
+    if (trueEntry != NoPathEntry && !decide(*trueState, trueEntry)) {
       pruneState(*trueState);
       trueState = nullptr;
     }
-    if (marked && !decide(*falseState, falseEntry)) {
+    if (falseEntry != NoPathEntry && !decide(*falseState, falseEntry)) {
       pruneState(*falseState);
       falseState = nullptr;
     }
@@ -6773,7 +6789,9 @@ KValue Executor::createNondetValue(ExecutionState &state,
       if (!isPointer) {
         KTestObject *obj = si.getNextInput(name, bytes, NamedSeedMatching,
                                            StrictNamedSeedMatching);
-        if (!obj && DropExhaustedSeeds)
+        // (a seed without the decision of an allocation, e.g., of a run
+        // that does not model the failures, takes it as succeeded)
+        if (!obj && DropExhaustedSeeds && name != AllocFailInput)
           continue;
         if (obj) {
           if (obj->numBytes > bytes && !AllowSeedTruncation)
@@ -7338,7 +7356,8 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
     const auto &value = nondets[i].first;
     const auto &segment = nondets[i].second;
     std::string descr = it.name;
-    if (it.kinstruction) {
+    // (the decisions of the allocations are named without the location)
+    if (it.kinstruction && it.name != AllocFailInput) {
       auto *info = it.kinstruction->info;
       if (!info->file.empty()) {
           descr += ":" + llvm::sys::path::filename(info->file).str() +

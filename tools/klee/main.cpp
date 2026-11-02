@@ -1096,12 +1096,14 @@ void KleeHandler::processTestCase(const ExecutionState &state,
 
         //llvm::errs() << *state.lastLoopHead << "\n";
         //llvm::errs() << *state.lastLoopCheck << "\n";
-        for (auto& input : testvec) {
-          const auto& name = input.getName();
-          if (name.compare(0, 17 , "__VERIFIER_nondet") != 0)
-              continue;
-
-          if (state.lastLoopHead && state.lastLoopHeadId == (size_t)node) {
+        // (lastLoopHeadId is the number of the inputs before the loop
+        // head, also of those that are not in the witness)
+        bool loopHeadDone = false;
+        for (size_t idx = 0; idx < testvec.size(); ++idx) {
+          const auto& input = testvec[idx];
+          if (state.lastLoopHead && !loopHeadDone &&
+              state.lastLoopHeadId <= idx) {
+            loopHeadDone = true;
             cyclehead = node + 1;
             *witness <<
               "<node id=\""<< node + 1 << "\">\n"
@@ -1115,6 +1117,10 @@ void KleeHandler::processTestCase(const ExecutionState &state,
             *witness << "</edge>\n";
             ++node;
           }
+
+          const auto& name = input.getName();
+          if (name.compare(0, 17 , "__VERIFIER_nondet") != 0)
+              continue;
 
           *witness <<
             "<node id=\""<< node + 1 << "\"/>\n";
@@ -1131,7 +1137,7 @@ void KleeHandler::processTestCase(const ExecutionState &state,
         }
 
         // was the loop head after all values?
-        if (state.lastLoopHead && state.lastLoopHeadId == (size_t)node) {
+        if (state.lastLoopHead && !loopHeadDone) {
           cyclehead = node + 1;
           *witness <<
             "<node id=\""<< node + 1 << "\">\n"

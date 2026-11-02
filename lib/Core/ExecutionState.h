@@ -185,6 +185,19 @@ inline std::uint64_t pathEntry(std::uint32_t id, std::uint32_t dir) {
   return (std::uint64_t(id) << 32) | dir;
 }
 
+/// @brief The ID of the entries of the failed allocations on a path
+/// (-alloc-may-fail): a call of malloc, calloc, realloc, ... that fails is
+/// the entry (AllocFailPathId, 0), a call that succeeds is not on the path
+/// (so the paths without failed allocations are the same as those of the
+/// runs that do not model the failures). No marked branch has this ID.
+constexpr std::uint32_t AllocFailPathId = 0xffffffffu;
+
+/// @brief The name of the input that decides whether an allocation fails
+/// (-alloc-may-fail): a 1-byte value per allocation call, nonzero = the
+/// call fails (returns NULL). The name of the object in a .ktest is exactly
+/// this (no location), the objects are in the order of the calls.
+inline const std::string AllocFailInput("__bbk_alloc_fail");
+
 /// @brief A part of a path: the entries after those of the parent. The
 /// chunks are shared by the states, a state appends to its last chunk only
 /// if no other state or chunk refers to it.

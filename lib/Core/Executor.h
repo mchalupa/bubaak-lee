@@ -498,6 +498,14 @@ private:
   StatePair fork(ExecutionState &current, ref<Expr> condition, bool isInternal,
                  BranchType reason, std::int64_t mark = -1);
 
+  /// Like fork, with the entries of the sides on the path given explicitly:
+  /// a side with NoPathEntry is not on the path (any prefix path allows it,
+  /// the prefix paths are checked at the next entry). Both entries are
+  /// NoPathEntry if the paths are not recorded.
+  StatePair forkWithEntries(ExecutionState &current, ref<Expr> condition,
+                            bool isInternal, BranchType reason,
+                            std::uint64_t trueEntry, std::uint64_t falseEntry);
+
   // If the MaxStatic*Pct limits have been reached, concretize the condition and
   // return it. Otherwise, return the unmodified condition.
   ref<Expr> maxStaticPctChecks(ExecutionState &current, ref<Expr> condition);
