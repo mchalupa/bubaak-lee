@@ -93,6 +93,7 @@ ExecutionState::~ExecutionState() {
 
 ExecutionState::ExecutionState(const ExecutionState& state):
     nondetValues(state.nondetValues),
+    nondetBytes(state.nondetBytes),
     lastLoopHead(state.lastLoopHead),
     lastLoopHeadId(state.lastLoopHeadId),
     lastLoopCheck(state.lastLoopCheck),
@@ -263,6 +264,7 @@ void ExecutionState::removeAlloca(const MemoryObject *mo) {
 ExecutionState::NondetValue&
 ExecutionState::addNondetValue(const KValue &kval, bool isSigned, const std::string& name) {
     nondetValues.emplace_back(kval, isSigned, name);
+    nondetBytes += (kval.getWidth() + 7) / 8;
     return nondetValues.back();
 }
 

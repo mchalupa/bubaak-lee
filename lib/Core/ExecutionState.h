@@ -300,6 +300,8 @@ public:
 
   // FIXME: wouldn't unique_ptr be more efficient (no ref<> copying)
   std::vector<NondetValue> nondetValues;
+  /// The bytes of the nondet values (the input of the path)
+  std::uint64_t nondetBytes = 0;
   // FIXME: this is a hack to be able to generate termination witnesses for SV-COMP
   llvm::Instruction *lastLoopHead{nullptr};
   size_t lastLoopHeadId{0};

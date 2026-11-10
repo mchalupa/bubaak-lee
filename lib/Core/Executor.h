@@ -211,6 +211,11 @@ private:
   /// The number of the prefix paths whose ends some states reached
   std::uint64_t usedPrefixPaths = 0;
 
+  /// The most bytes of nondet values that a state took (its input) and
+  /// that the progress file reports
+  std::uint64_t maxNondetBytes = 0;
+  std::uint64_t reportedNondetBytes = 0;
+
   /// The paths of the states that are being dumped were written already
   bool unfinishedPathsWritten = false;
 

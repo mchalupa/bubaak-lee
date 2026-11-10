@@ -710,7 +710,9 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
     if (!progressFile)
       klee_error("Unable to open the progress file.");
     *progressFile << "# time_ms covered_instructions states forks "
-                     "instructions\n";
+                     "instructions\n"
+                     "# (and '# input_bytes N' when a state took more "
+                     "bytes of nondet values than before)\n";
     progressFile->flush();
     timers.add(std::make_unique<Timer>(time::Span{ProgressInterval},
                                        [&] { writeProgress(); }));
@@ -4350,6 +4352,12 @@ void Executor::writeProgress() {
   if (prefixPaths)
     *progressFile << ' ' << usedPrefixPaths;
   *progressFile << '\n';
+  for (const ExecutionState *state : states)
+    maxNondetBytes = std::max(maxNondetBytes, state->nondetBytes);
+  if (maxNondetBytes > reportedNondetBytes) {
+    *progressFile << "# input_bytes " << maxNondetBytes << '\n';
+    reportedNondetBytes = maxNondetBytes;
+  }
   progressFile->flush();
 }
 
@@ -4807,6 +4815,7 @@ void Executor::terminateState(ExecutionState &state,
     lastTestState = nullptr;
 
   interpreterHandler->incPathsExplored();
+  maxNondetBytes = std::max(maxNondetBytes, state.nondetBytes);
   removeState(state, reason);
 }
 
